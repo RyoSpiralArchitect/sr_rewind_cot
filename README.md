@@ -35,11 +35,15 @@ This makes it useful for experiments about:
 - Run OpenAI-compatible HTTP backends such as local vLLM, Ollama, LiteLLM-compatible endpoints, or hosted APIs.
 - Use prompt families and prompt versions, including `v2` task families like `general_reasoning`, `math_reasoning`, `logic_reasoning`, `story_reasoning`, and `strict_answer_format`.
 - Build traces in JSON or plain text, with `auto` selection depending on whether streaming is enabled.
+- Generate multiple forward trace candidates and rerank them with a pseudo Process Reward Model (`PRM-lite`) before running downstream rewind analysis.
+- Optionally rerank multiple rewind-step candidates with the same pseudo Process Reward Model idea, so forward and reverse reasoning can be compared under matched heuristics.
 - Stream the forward trace first, then stream rewind recovery.
 - Save raw generations and prompt/output logs as JSONL for inspection.
 - Save atomic `step_records` so steps can be analyzed as structured claims instead of only flat strings.
 - Compute forward stability curves, entropy, divergence, rewind novelty, fixed-point depth, and core-strength style metrics.
-- Plot forward, rewind, bridge, trace-vs-rewind similarity, and rewind novelty figures.
+- Compare `base` vs `PRM-selected` traces on both the forward and rewind side, including a dedicated `base rewind` vs `PRM rewind` axis.
+- Record stage timings and rewind workload counts so bottlenecks can be read directly from `summary.csv`.
+- Plot forward, rewind, bridge, trace-vs-rewind similarity, rewind novelty, rewind axes, and base-vs-PRM-vs-rewind comparisons.
 
 ## Research Framing
 
@@ -147,6 +151,8 @@ Common outputs include:
 - `<backend>__<qid>.json`: full structured result
 - `<backend>__<qid>__generations.jsonl`: prompt/output log when enabled
 - `<backend>__<qid>__trace_vs_rewind.jsonl`: pairwise forward-vs-rewind comparison rows
+- `<backend>__<qid>__trace_axes.jsonl`: forward `base / PRM / rewind` alignment rows
+- `<backend>__<qid>__rewind_axes.jsonl`: `base rewind` vs `PRM rewind` alignment rows
 - `plots/`: generated figures
 
 Typical plots include:
@@ -164,6 +170,8 @@ Typical plots include:
 - `rewind_fixed_point_depth`: first rewind depth where novelty falls below the threshold
 - `rewind_core_strength`: a compact measure of how strongly rewind has collapsed into a recurring core
 - `trace_vs_rewind_preservation_rate`: how much of the forward trace survives rewind alignment
+- `rewind_axis_base_prm_preservation_rate`: how different the raw rewind path is from the PRM-guided rewind path
+- `time_rewind_total_s` and `rewind_total_generation_calls`: where rewind runtime is actually being spent
 
 These metrics are most useful together. A run can have unstable answers but still show a very strong semantic attractor in rewind space.
 

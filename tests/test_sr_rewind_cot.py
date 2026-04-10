@@ -259,6 +259,111 @@ class TestTraceParsing(unittest.TestCase):
         )
         self.assertEqual(obj["answer"], "B is lying.")
 
+
+class TestProcessRewardLite(unittest.TestCase):
+    def test_prm_lite_reranks_trace_candidates_toward_atomic_trace(self) -> None:
+        class _TraceBackend:
+            def __init__(self) -> None:
+                self._ix = 0
+
+            def generate(self, prompt: str, temperature: float, seed=None) -> str:
+                outputs = [
+                    json.dumps(
+                        {
+                            "steps": [
+                                "In summary, Pascal's Wager and agnostic theism differ because one is prudential and the other is epistemic, so the fundamental difference is pragmatic justification versus uncertain belief, which is the answer."
+                            ],
+                            "answer": "Pascal's Wager is a prudential argument, while agnostic theism is an epistemic stance of belief without claimed knowledge.",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "steps": [
+                                {"type": "facet", "text": "Pascal's Wager argues about whether one should believe under uncertainty."},
+                                {"type": "facet", "text": "Agnostic theism combines belief in God with a refusal to claim certain knowledge."},
+                                {"type": "comparison", "text": "So the difference is prudential motivation for belief versus an epistemic stance about knowledge."},
+                            ],
+                            "answer": "Pascal's Wager is prudential, while agnostic theism is epistemic.",
+                        }
+                    ),
+                ]
+                out = outputs[min(self._ix, len(outputs) - 1)]
+                self._ix += 1
+                return out
+
+        settings = spbc.ExperimentSettings(
+            process_reward_mode="lite",
+            trace_candidates=2,
+            trace_candidate_temperature=0.6,
+            prompt_version="v2",
+            prompt_family="general_reasoning",
+        )
+        bundle = spbc.build_trace_bundle(
+            _TraceBackend(),
+            "What is the fundamental difference between Pascal's Wager and agnostic theism?",
+            settings,
+            seed=123,
+        )
+        prm = bundle.get("process_reward") or {}
+        selected = bundle["selected_trace"]
+        self.assertEqual(int(prm.get("selected_candidate_index", -1)), 1)
+        self.assertGreater(float(prm.get("selected_score", 0.0) or 0.0), float(prm.get("base_score", 0.0) or 0.0))
+        self.assertEqual(
+            selected.steps,
+            [
+                "Pascal's Wager argues about whether one should believe under uncertainty.",
+                "Agnostic theism combines belief in God with a refusal to claim certain knowledge.",
+                "So the difference is prudential motivation for belief versus an epistemic stance about knowledge.",
+            ],
+        )
+
+    def test_three_axis_trace_comparison_builds_pairwise_rows(self) -> None:
+        base_trace = spbc.Trace(
+            steps=[
+                "Pascal's Wager concerns pragmatic reasons for belief.",
+                "Agnostic theism concerns belief without claimed certainty.",
+            ],
+            answer="The difference is pragmatic justification versus epistemic stance.",
+            step_records=spbc.normalize_trace_step_records(
+                [
+                    {"type": "facet", "text": "Pascal's Wager concerns pragmatic reasons for belief."},
+                    {"type": "facet", "text": "Agnostic theism concerns belief without claimed certainty."},
+                ]
+            ),
+        )
+        prm_trace = spbc.Trace(
+            steps=[
+                "Pascal's Wager is a prudential argument about whether belief is worth adopting.",
+                "Agnostic theism allows belief while withholding a claim of knowledge.",
+                "So the difference is prudential motivation versus epistemic stance.",
+            ],
+            answer="The difference is prudential motivation versus epistemic stance.",
+            step_records=spbc.normalize_trace_step_records(
+                [
+                    {"type": "facet", "text": "Pascal's Wager is a prudential argument about whether belief is worth adopting."},
+                    {"type": "facet", "text": "Agnostic theism allows belief while withholding a claim of knowledge."},
+                    {"type": "comparison", "text": "So the difference is prudential motivation versus epistemic stance."},
+                ]
+            ),
+        )
+        rewind_trace = {
+            "forward_order": [
+                "Pascal's Wager is a prudential argument about whether belief is worth adopting.",
+                "Agnostic theism allows belief while withholding a claim of knowledge.",
+                "So the difference is prudential motivation versus epistemic stance.",
+            ]
+        }
+
+        comp = spbc.build_three_axis_trace_comparison(base_trace, prm_trace, rewind_trace)
+        self.assertIsNotNone(comp)
+        assert comp is not None
+        self.assertEqual(comp["base_len"], 2)
+        self.assertEqual(comp["prm_len"], 3)
+        self.assertEqual(comp["rewind_len"], 3)
+        self.assertEqual(len(comp["rows"]), 3)
+        self.assertIn("base_prm_similarity", comp["rows"][0])
+        self.assertGreater(float((comp["prm_rewind"] or {}).get("similarity_mean") or 0.0), 0.95)
+
     def test_extract_trace_payload_fallback_recovers_string_step_array_from_truncated_object(self) -> None:
         raw = """
 {
@@ -601,6 +706,120 @@ class TestRawGenerationCapture(unittest.TestCase):
 
         self.assertIn("raw_answers_by_depth", rewind["oracle_tail_curve"])
         self.assertEqual(len(rewind["oracle_tail_curve"]["raw_answers_by_depth"]), 3)
+
+
+class TestRewindProcessRewardLite(unittest.TestCase):
+    def test_rewind_prm_lite_prefers_atomic_candidate(self) -> None:
+        class _RewindBackend:
+            def __init__(self) -> None:
+                self.name = "rewind-prm"
+                self._ix = 0
+
+            def generate(self, prompt: str, temperature: float, seed=None) -> str:
+                if "Recover EXACTLY ONE short reasoning step" not in prompt:
+                    return "irrelevant"
+                outputs = [
+                    json.dumps({
+                        "step": "In summary, the difference is that Pascal's Wager is practical and agnostic theism is epistemic, which already states the answer.",
+                        "novelty": "compressed comparison",
+                        "why_earlier": "",
+                    }),
+                    json.dumps({
+                        "step": "Pascal's Wager asks whether belief is worth adopting under uncertainty.",
+                        "novelty": "isolates Pascal's Wager before the comparison step",
+                        "why_earlier": "It introduces one side of the comparison as a prerequisite.",
+                    }),
+                    json.dumps({
+                        "step": "Overall, agnostic theism differs because it keeps belief while denying certainty, which again summarizes the answer.",
+                        "novelty": "summary restatement",
+                        "why_earlier": "",
+                    }),
+                    json.dumps({
+                        "step": "Agnostic theism allows belief in God while withholding a claim of certain knowledge.",
+                        "novelty": "isolates the epistemic stance as a separate facet",
+                        "why_earlier": "It supplies the second prerequisite before the final contrast.",
+                    }),
+                ]
+                out = outputs[min(self._ix, len(outputs) - 1)]
+                self._ix += 1
+                return out
+
+        trace = spbc.Trace(
+            steps=[
+                "Pascal's Wager is prudential.",
+                "Agnostic theism is epistemic.",
+            ],
+            answer="The difference is prudential motivation versus epistemic stance.",
+        )
+        settings = spbc.ExperimentSettings(
+            rewind_process_reward_mode="lite",
+            rewind_step_candidates=2,
+            rewind_novelty_retries=0,
+        )
+        rewind_trace = spbc.recover_rewind_trace(
+            _RewindBackend(),
+            "What is the fundamental difference between Pascal's Wager and agnostic theism?",
+            trace,
+            settings,
+            run_seed=123,
+        )
+
+        self.assertEqual(
+            rewind_trace["latest_to_earlier"][0],
+            "Pascal's Wager asks whether belief is worth adopting under uncertainty.",
+        )
+        self.assertEqual(
+            rewind_trace["latest_to_earlier"][1],
+            "Agnostic theism allows belief in God while withholding a claim of certain knowledge.",
+        )
+        self.assertEqual(rewind_trace["process_reward_mode"], "lite")
+        self.assertEqual(rewind_trace["process_reward_step_candidates"], 2)
+        self.assertGreater(float(rewind_trace["process_reward_mean"] or 0.0), 0.5)
+        self.assertEqual(rewind_trace["step_records"][0]["selected_candidate_index"], 1)
+        self.assertEqual(
+            rewind_trace["base_rewind"]["latest_to_earlier"][0],
+            "In summary, the difference is that Pascal's Wager is practical and agnostic theism is epistemic, which already states the answer.",
+        )
+        self.assertEqual(rewind_trace["generation_calls"], 4)
+        self.assertEqual(rewind_trace["generation_attempts"], 2)
+        self.assertGreater(
+            float(rewind_trace["process_reward_mean"] or 0.0),
+            float(rewind_trace["process_reward_base_mean"] or 0.0),
+        )
+
+        rewind_axes = spbc.build_rewind_axis_comparison(rewind_trace)
+        self.assertIsNotNone(rewind_axes)
+        self.assertLess(
+            float((rewind_axes or {}).get("rewind_base_prm", {}).get("similarity_mean") or 1.0),
+            1.0,
+        )
+
+    def test_runtime_summary_includes_rewind_workload(self) -> None:
+        summary = spbc.summarize_runtime_for_summary({
+            "stage_timings_s": {
+                "trace_build_s": 0.11,
+                "forward_curve_s": 0.22,
+                "bridge_total_s": 0.55,
+                "total_s": 1.23,
+            },
+            "rewind_timings_s": {
+                "rewind_total_s": 0.66,
+                "rewind_trace_s": 0.21,
+                "rewind_curve_s": 0.30,
+                "oracle_tail_curve_s": 0.15,
+            },
+            "rewind_workload": {
+                "rewind_trace_generation_calls": 8,
+                "rewind_trace_attempts": 4,
+                "rewind_tail_answer_calls": 27,
+                "oracle_tail_answer_calls": 27,
+                "rewind_total_generation_calls": 62,
+            },
+        })
+        self.assertEqual(summary["rewind_trace_generation_calls"], 8)
+        self.assertEqual(summary["rewind_trace_attempts"], 4)
+        self.assertEqual(summary["rewind_total_generation_calls"], 62)
+        self.assertAlmostEqual(float(summary["time_rewind_total_s"] or 0.0), 0.66, places=6)
 
 
 if __name__ == "__main__":

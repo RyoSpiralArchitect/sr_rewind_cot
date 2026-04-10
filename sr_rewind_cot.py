@@ -647,6 +647,33 @@ def normalize_trace_step_records(raw_steps: Any) -> List[Dict[str, Any]]:
 def normalize_trace_steps(raw_steps: Any) -> List[str]:
     return [record["text"] for record in normalize_trace_step_records(raw_steps)]
 
+def clamp01(x: Any) -> float:
+    try:
+        v = float(x)
+    except Exception:
+        return 0.0
+    return max(0.0, min(1.0, v))
+
+def trace_to_payload(trace: "Trace", *, include_metadata: bool = False) -> Dict[str, Any]:
+    payload = {
+        "steps": list(trace.steps),
+        "step_records": list(trace.step_records or []),
+        "answer": trace.answer,
+    }
+    if include_metadata and trace.metadata:
+        payload["metadata"] = trace.metadata
+    return payload
+
+def trace_from_payload(payload: Dict[str, Any]) -> "Trace":
+    raw_steps = payload.get("step_records") if isinstance(payload.get("step_records"), list) else payload.get("steps", [])
+    step_records = normalize_trace_step_records(raw_steps)
+    return Trace(
+        steps=[record["text"] for record in step_records],
+        answer=str(payload.get("answer", "")),
+        step_records=step_records,
+        metadata=(dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else None),
+    )
+
 def extract_trace_answer(obj: Dict[str, Any]) -> str:
     for key in ("answer", "final_answer", "final", "output"):
         value = obj.get(key)
@@ -981,6 +1008,348 @@ def compute_rewind_core_metrics(
         "core_strength": core_strength,
     }
 
+def summarize_rewind_alignment(
+    original_latest_to_earlier: List[str],
+    recovered_latest_to_earlier: List[str],
+) -> Dict[str, Any]:
+    alignment: List[Dict[str, Any]] = []
+    sims: List[float] = []
+    for j, (orig, rec) in enumerate(zip(original_latest_to_earlier, recovered_latest_to_earlier)):
+        sim = step_semantic_similarity(orig, rec)
+        sims.append(sim)
+        alignment.append({
+            "index_from_end": j + 1,
+            "index_from_start": len(original_latest_to_earlier) - j,
+            "original_step": orig,
+            "recovered_step": rec,
+            "similarity": sim,
+        })
+
+    tail_n = max(1, int(math.ceil(len(sims) * 0.25))) if sims else 0
+    return {
+        "alignment": alignment,
+        "loop_closure_mean": mean_or_none(sims),
+        "loop_closure_tail_mean": mean_or_none(sims[:tail_n]) if sims else None,
+    }
+
+def summarize_rewind_sequence_metrics(
+    question: str,
+    answer: str,
+    steps_latest_to_earlier: List[str],
+    novelty_threshold: float,
+) -> Dict[str, Any]:
+    prior: List[str] = []
+    recovered_records: List[Dict[str, Any]] = []
+    novelty_rows: List[Dict[str, Any]] = []
+    score_rows: List[Dict[str, Any]] = []
+    for depth, raw_step in enumerate(steps_latest_to_earlier, start=1):
+        step = str(raw_step).strip()
+        novelty_info = rewind_step_novelty_info(step, prior, novelty_threshold)
+        reward = score_rewind_candidate_lite(question, answer, step, prior)
+        recovered_records.append({
+            "depth": depth,
+            "step": step,
+            "attempts_used": 1,
+            "selected_attempt": 1,
+            "selected_candidate_index": 0,
+            "novelty_annotation": "",
+            "why_earlier": "",
+            "process_reward_score": reward.get("score"),
+            "process_reward_atomicity": reward.get("atomicity"),
+            "process_reward_relevance": reward.get("relevance"),
+        })
+        novelty_rows.append({
+            "depth": depth,
+            "step": step,
+            "max_similarity_to_previous": float(novelty_info.get("max_similarity_to_previous", 0.0) or 0.0),
+            "max_char_similarity_to_previous": float(novelty_info.get("max_char_similarity_to_previous", 0.0) or 0.0),
+            "max_jaccard_similarity_to_previous": float(novelty_info.get("max_jaccard_similarity_to_previous", 0.0) or 0.0),
+            "closest_previous_step": novelty_info.get("closest_previous_step"),
+            "novelty": float(novelty_info.get("novelty", 0.0) or 0.0),
+            "is_fixed_point_candidate": bool(novelty_info.get("is_fixed_point_candidate", False)),
+            "selected_attempt": 1,
+        })
+        score_rows.append({
+            "depth": depth,
+            "step": step,
+            "score": float(reward.get("score", 0.0) or 0.0),
+            "atomicity": float(reward.get("atomicity", 0.0) or 0.0),
+            "relevance": float(reward.get("relevance", 0.0) or 0.0),
+            "answer_leak_penalty": float(reward.get("answer_leak_penalty", 0.0) or 0.0),
+            "summary_penalty": float(reward.get("summary_penalty", 0.0) or 0.0),
+            "novelty": float(reward.get("novelty", 0.0) or 0.0),
+        })
+        prior.append(step)
+    return {
+        "step_records": list(reversed(recovered_records)),
+        "novelty_curve": novelty_rows,
+        "process_reward_step_scores": score_rows,
+        "process_reward_mean": mean_or_none([float(row.get("score", 0.0) or 0.0) for row in score_rows]),
+        **summarize_rewind_novelty(novelty_rows, threshold=novelty_threshold),
+    }
+
+def trace_step_relevance(question: str, text: str) -> float:
+    return clamp01(max(
+        content_jaccard_similarity(question, text),
+        0.5 * sequence_similarity(question, text),
+    ))
+
+def trace_step_atomicity_score(text: str) -> float:
+    lower = f" {normalize_answer(text)} "
+    words = CONTENT_WORD_RE.findall(lower)
+    score = 1.0
+    if len(words) < 4:
+        score -= 0.15
+    if len(words) > 28:
+        score -= min(0.45, 0.02 * float(len(words) - 28))
+    clause_markers = sum(lower.count(tok) for tok in [
+        " and ", " but ", " because ", " therefore ", " however ", " while ",
+        " which ", " that ", " then ", " so ",
+    ])
+    punctuation_markers = text.count(";") + text.count(":") + max(0, text.count(",") - 1)
+    score -= min(0.5, 0.12 * max(0, clause_markers - 1) + 0.05 * punctuation_markers)
+    return clamp01(score)
+
+def trace_step_summary_penalty(text: str, step_type: str, step_index: int, total_steps: int) -> float:
+    lower = normalize_answer(text)
+    penalty = 0.0
+    if any(marker in lower for marker in [
+        "in summary", "overall", "we can conclude", "this means",
+        "the answer", "therefore", "thus", "so the difference",
+    ]):
+        penalty += 0.35
+    if step_index < total_steps - 1 and step_type in {"summary", "comparison", "conclusion"}:
+        penalty += 0.25
+    return clamp01(penalty)
+
+def trace_step_answer_leak_penalty(text: str, answer: str) -> float:
+    answer_norm = normalize_answer(answer)
+    if not answer_norm:
+        return 0.0
+    step_norm = normalize_answer(text)
+    penalty = clamp01((step_semantic_similarity(text, answer) - 0.62) / 0.30)
+    if answer_norm and answer_norm in step_norm:
+        penalty = max(penalty, 0.95)
+    return penalty
+
+def score_trace_step_record(
+    question: str,
+    answer: str,
+    record: Dict[str, Any],
+    previous_steps: List[str],
+    *,
+    step_index: int,
+    total_steps: int,
+) -> Dict[str, Any]:
+    text = str(record.get("text") or "").strip()
+    step_type = str(record.get("type") or "step").strip() or "step"
+    novelty_info = rewind_step_novelty_info(text, previous_steps, 0.82)
+    atomicity = trace_step_atomicity_score(text)
+    relevance = trace_step_relevance(question, text)
+    answer_leak_penalty = trace_step_answer_leak_penalty(text, answer)
+    if step_index == total_steps - 1:
+        answer_leak_penalty *= 0.35
+    summary_penalty = trace_step_summary_penalty(text, step_type, step_index, total_steps)
+    type_bonus = 0.0
+    if step_type in {"premise", "facet", "assumption", "constraint", "observation", "deduction", "prerequisite"}:
+        type_bonus += 0.05
+    if step_type in {"summary", "conclusion"} and step_index < total_steps - 1:
+        type_bonus -= 0.05
+    score = clamp01(
+        0.42 * atomicity
+        + 0.28 * float(novelty_info.get("novelty", 0.0) or 0.0)
+        + 0.18 * relevance
+        + type_bonus
+        - 0.20 * answer_leak_penalty
+        - 0.18 * summary_penalty
+    )
+    return {
+        "id": record.get("id"),
+        "type": step_type,
+        "text": text,
+        "atomicity": atomicity,
+        "relevance": relevance,
+        "novelty": float(novelty_info.get("novelty", 0.0) or 0.0),
+        "max_similarity_to_previous": float(novelty_info.get("max_similarity_to_previous", 0.0) or 0.0),
+        "answer_leak_penalty": answer_leak_penalty,
+        "summary_penalty": summary_penalty,
+        "score": score,
+    }
+
+def score_trace_candidate_lite(question: str, trace: "Trace") -> Dict[str, Any]:
+    records = normalize_trace_step_records(trace.step_records if trace.step_records is not None else trace.steps)
+    previous_steps: List[str] = []
+    step_scores: List[Dict[str, Any]] = []
+    for idx, record in enumerate(records):
+        row = score_trace_step_record(
+            question,
+            trace.answer,
+            record,
+            previous_steps,
+            step_index=idx,
+            total_steps=len(records),
+        )
+        step_scores.append(row)
+        previous_steps.append(row["text"])
+
+    mean_atomicity = mean_or_none([float(row["atomicity"]) for row in step_scores]) or 0.0
+    mean_relevance = mean_or_none([float(row["relevance"]) for row in step_scores]) or 0.0
+    mean_novelty = mean_or_none([float(row["novelty"]) for row in step_scores]) or 0.0
+    mean_answer_leak = mean_or_none([float(row["answer_leak_penalty"]) for row in step_scores]) or 0.0
+    mean_summary_penalty = mean_or_none([float(row["summary_penalty"]) for row in step_scores]) or 0.0
+    mean_step_score = mean_or_none([float(row["score"]) for row in step_scores]) or 0.0
+    step_count_score = clamp01((len(step_scores) - 1) / 4.0)
+    if len(step_scores) > 8:
+        step_count_score = clamp01(step_count_score - 0.03 * float(len(step_scores) - 8))
+    answer_present = 1.0 if normalize_answer(trace.answer) else 0.0
+    answer_relevance = trace_step_relevance(question, trace.answer) if trace.answer else 0.0
+    redundancy_penalty = mean_or_none([
+        float(row.get("max_similarity_to_previous", 0.0) or 0.0)
+        for row in step_scores[1:]
+    ]) or 0.0
+    overall_score = clamp01(
+        0.30 * mean_atomicity
+        + 0.22 * mean_novelty
+        + 0.18 * mean_relevance
+        + 0.15 * step_count_score
+        + 0.05 * answer_present
+        + 0.05 * answer_relevance
+        - 0.20 * mean_answer_leak
+        - 0.15 * mean_summary_penalty
+        - 0.10 * redundancy_penalty
+    )
+    return {
+        "mode": "lite",
+        "overall_score": overall_score,
+        "mean_step_score": mean_step_score,
+        "mean_atomicity": mean_atomicity,
+        "mean_relevance": mean_relevance,
+        "mean_novelty": mean_novelty,
+        "mean_answer_leak_penalty": mean_answer_leak,
+        "mean_summary_penalty": mean_summary_penalty,
+        "redundancy_penalty": redundancy_penalty,
+        "step_count_score": step_count_score,
+        "answer_present_score": answer_present,
+        "answer_relevance": answer_relevance,
+        "step_scores": step_scores,
+    }
+
+def score_rewind_candidate_lite(
+    question: str,
+    answer: str,
+    step: str,
+    previous_steps: List[str],
+    *,
+    step_type: str = "rewind_step",
+    novelty_annotation: str = "",
+    why_earlier: str = "",
+) -> Dict[str, Any]:
+    novelty_info = rewind_step_novelty_info(step, previous_steps, 0.82)
+    atomicity = trace_step_atomicity_score(step)
+    relevance = trace_step_relevance(question, step)
+    answer_leak_penalty = trace_step_answer_leak_penalty(step, answer)
+    summary_penalty = trace_step_summary_penalty(step, step_type, 0, 2)
+    explanation_bonus = 0.05 if str(why_earlier or "").strip() else 0.0
+    novelty_bonus = 0.03 if str(novelty_annotation or "").strip() else 0.0
+    score = clamp01(
+        0.36 * float(novelty_info.get("novelty", 0.0) or 0.0)
+        + 0.26 * atomicity
+        + 0.18 * relevance
+        + explanation_bonus
+        + novelty_bonus
+        - 0.18 * answer_leak_penalty
+        - 0.14 * summary_penalty
+    )
+    return {
+        **novelty_info,
+        "atomicity": atomicity,
+        "relevance": relevance,
+        "answer_leak_penalty": answer_leak_penalty,
+        "summary_penalty": summary_penalty,
+        "explanation_bonus": explanation_bonus,
+        "novelty_annotation_bonus": novelty_bonus,
+        "score": score,
+    }
+
+def compare_step_sequences(
+    left_steps: List[str],
+    right_steps: List[str],
+    *,
+    left_label: str,
+    right_label: str,
+) -> Dict[str, Any]:
+    left = [str(s).strip() for s in left_steps if str(s).strip()]
+    right = [str(s).strip() for s in right_steps if str(s).strip()]
+    if not left and not right:
+        return {
+            "left_label": left_label,
+            "right_label": right_label,
+            "left_len": 0,
+            "right_len": 0,
+            "similarity_mean": None,
+            "similarity_concat": None,
+            "preservation_rate": None,
+            "exact_match_count": 0,
+            "paraphrase_count": 0,
+            "changed_count": 0,
+            "missing_count": 0,
+            "extra_count": 0,
+            "pairwise_alignment": [],
+        }
+
+    pairwise: List[Dict[str, Any]] = []
+    sims_both: List[float] = []
+    counts = Counter()
+    n = max(len(left), len(right))
+    for i in range(n):
+        left_step = left[i] if i < len(left) else ""
+        right_step = right[i] if i < len(right) else ""
+        if left_step and right_step:
+            sim = step_semantic_similarity(left_step, right_step)
+            sims_both.append(sim)
+            if normalize_answer(left_step) == normalize_answer(right_step):
+                status = "exact"
+            elif sim >= 0.75:
+                status = "paraphrase"
+            else:
+                status = "changed"
+        elif left_step:
+            sim = 0.0
+            status = f"missing_in_{right_label}"
+        elif right_step:
+            sim = 0.0
+            status = f"extra_in_{right_label}"
+        else:
+            sim = 0.0
+            status = "empty"
+        counts[status] += 1
+        pairwise.append({
+            "index": i,
+            "left_step": left_step,
+            "right_step": right_step,
+            f"{left_label}_step": left_step,
+            f"{right_label}_step": right_step,
+            "similarity": sim,
+            "status": status,
+        })
+
+    preservation_rate = (counts["exact"] + counts["paraphrase"]) / max(1, len(left))
+    return {
+        "left_label": left_label,
+        "right_label": right_label,
+        "left_len": len(left),
+        "right_len": len(right),
+        "similarity_mean": mean_or_none(sims_both),
+        "similarity_concat": sequence_similarity("\n".join(left), "\n".join(right)),
+        "preservation_rate": preservation_rate,
+        "exact_match_count": counts["exact"],
+        "paraphrase_count": counts["paraphrase"],
+        "changed_count": counts["changed"],
+        "missing_count": counts[f"missing_in_{right_label}"],
+        "extra_count": counts[f"extra_in_{right_label}"],
+        "pairwise_alignment": pairwise,
+    }
+
 def compare_forward_and_rewind_steps(original_steps: List[str], rewind_trace: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not isinstance(rewind_trace, dict):
         return None
@@ -991,54 +1360,103 @@ def compare_forward_and_rewind_steps(original_steps: List[str], rewind_trace: Di
         return None
     if not original and not recovered_forward:
         return None
+    comp = compare_step_sequences(original, recovered_forward, left_label="original", right_label="rewind")
+    pairwise = []
+    for row in comp.get("pairwise_alignment", []) or []:
+        item = dict(row)
+        item["original_step"] = item.get("left_step", "")
+        item["rewind_step"] = item.get("right_step", "")
+        pairwise.append(item)
+    return {
+        "original_len": comp.get("left_len"),
+        "rewind_len": comp.get("right_len"),
+        "similarity_mean": comp.get("similarity_mean"),
+        "similarity_concat": comp.get("similarity_concat"),
+        "preservation_rate": comp.get("preservation_rate"),
+        "exact_match_count": comp.get("exact_match_count"),
+        "paraphrase_count": comp.get("paraphrase_count"),
+        "changed_count": comp.get("changed_count"),
+        "missing_count": comp.get("missing_count"),
+        "extra_count": comp.get("extra_count"),
+        "pairwise_alignment": pairwise,
+    }
 
-    pairwise: List[Dict[str, Any]] = []
-    sims_both: List[float] = []
-    counts = Counter()
-    n = max(len(original), len(recovered_forward))
+def build_three_axis_trace_comparison(
+    base_trace: "Trace",
+    prm_trace: "Trace",
+    rewind_trace: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(rewind_trace, dict):
+        return None
+    rewind_forward = rewind_trace.get("forward_order") or list(reversed(rewind_trace.get("latest_to_earlier") or []))
+    rewind_forward = [str(s).strip() for s in rewind_forward if str(s).strip()]
+    if not rewind_forward:
+        return None
+
+    comp_base_prm = compare_step_sequences(base_trace.steps, prm_trace.steps, left_label="base", right_label="prm")
+    comp_base_rewind = compare_step_sequences(base_trace.steps, rewind_forward, left_label="base", right_label="rewind")
+    comp_prm_rewind = compare_step_sequences(prm_trace.steps, rewind_forward, left_label="prm", right_label="rewind")
+
+    bp_rows = {int(row.get("index", -1)): row for row in comp_base_prm.get("pairwise_alignment", []) or []}
+    br_rows = {int(row.get("index", -1)): row for row in comp_base_rewind.get("pairwise_alignment", []) or []}
+    pr_rows = {int(row.get("index", -1)): row for row in comp_prm_rewind.get("pairwise_alignment", []) or []}
+
+    n = max(len(base_trace.steps), len(prm_trace.steps), len(rewind_forward))
+    rows: List[Dict[str, Any]] = []
     for i in range(n):
-        orig = original[i] if i < len(original) else ""
-        rew = recovered_forward[i] if i < len(recovered_forward) else ""
-        if orig and rew:
-            sim = step_semantic_similarity(orig, rew)
-            sims_both.append(sim)
-            if normalize_answer(orig) == normalize_answer(rew):
-                status = "exact"
-            elif sim >= 0.75:
-                status = "paraphrase"
-            else:
-                status = "changed"
-        elif orig:
-            sim = 0.0
-            status = "missing_in_rewind"
-        elif rew:
-            sim = 0.0
-            status = "extra_in_rewind"
-        else:
-            sim = 0.0
-            status = "empty"
-        counts[status] += 1
-        pairwise.append({
+        bp = bp_rows.get(i, {})
+        br = br_rows.get(i, {})
+        pr = pr_rows.get(i, {})
+        rows.append({
             "index": i,
-            "original_step": orig,
-            "rewind_step": rew,
-            "similarity": sim,
-            "status": status,
+            "base_step": base_trace.steps[i] if i < len(base_trace.steps) else "",
+            "prm_step": prm_trace.steps[i] if i < len(prm_trace.steps) else "",
+            "rewind_step": rewind_forward[i] if i < len(rewind_forward) else "",
+            "base_prm_similarity": bp.get("similarity"),
+            "base_prm_status": bp.get("status"),
+            "base_rewind_similarity": br.get("similarity"),
+            "base_rewind_status": br.get("status"),
+            "prm_rewind_similarity": pr.get("similarity"),
+            "prm_rewind_status": pr.get("status"),
         })
 
-    preservation_rate = (counts["exact"] + counts["paraphrase"]) / max(1, len(original))
     return {
-        "original_len": len(original),
-        "rewind_len": len(recovered_forward),
-        "similarity_mean": mean_or_none(sims_both),
-        "similarity_concat": sequence_similarity("\n".join(original), "\n".join(recovered_forward)),
-        "preservation_rate": preservation_rate,
-        "exact_match_count": counts["exact"],
-        "paraphrase_count": counts["paraphrase"],
-        "changed_count": counts["changed"],
-        "missing_count": counts["missing_in_rewind"],
-        "extra_count": counts["extra_in_rewind"],
-        "pairwise_alignment": pairwise,
+        "base_len": len(base_trace.steps),
+        "prm_len": len(prm_trace.steps),
+        "rewind_len": len(rewind_forward),
+        "base_prm": comp_base_prm,
+        "base_rewind": comp_base_rewind,
+        "prm_rewind": comp_prm_rewind,
+        "rows": rows,
+    }
+
+def build_rewind_axis_comparison(rewind_trace: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(rewind_trace, dict):
+        return None
+    base_rewind_obj = rewind_trace.get("base_rewind") or {}
+    if not isinstance(base_rewind_obj, dict):
+        return None
+    base_forward = base_rewind_obj.get("forward_order") or list(reversed(base_rewind_obj.get("latest_to_earlier") or []))
+    prm_forward = rewind_trace.get("forward_order") or list(reversed(rewind_trace.get("latest_to_earlier") or []))
+    base_forward = [str(s).strip() for s in base_forward if str(s).strip()]
+    prm_forward = [str(s).strip() for s in prm_forward if str(s).strip()]
+    if not base_forward or not prm_forward:
+        return None
+    comp = compare_step_sequences(base_forward, prm_forward, left_label="rewind_base", right_label="rewind_prm")
+    rows = []
+    for row in comp.get("pairwise_alignment", []) or []:
+        rows.append({
+            "index": row.get("index"),
+            "rewind_base_step": row.get("left_step"),
+            "rewind_prm_step": row.get("right_step"),
+            "rewind_base_prm_similarity": row.get("similarity"),
+            "rewind_base_prm_status": row.get("status"),
+        })
+    return {
+        "rewind_base_len": len(base_forward),
+        "rewind_prm_len": len(prm_forward),
+        "rewind_base_prm": comp,
+        "rows": rows,
     }
 
 def trace_vs_rewind_jsonl_rows(comp: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1056,6 +1474,39 @@ def trace_vs_rewind_jsonl_rows(comp: Dict[str, Any]) -> List[Dict[str, Any]]:
         "extra_count": comp.get("extra_count"),
     }]
     for row in comp.get("pairwise_alignment", []) or []:
+        item = dict(row)
+        item["record_type"] = "step"
+        rows.append(item)
+    return rows
+
+def trace_axes_jsonl_rows(comp: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = [{
+        "record_type": "summary",
+        "base_len": comp.get("base_len"),
+        "prm_len": comp.get("prm_len"),
+        "rewind_len": comp.get("rewind_len"),
+        "base_prm_similarity_mean": ((comp.get("base_prm") or {}).get("similarity_mean") if isinstance(comp.get("base_prm"), dict) else None),
+        "base_rewind_similarity_mean": ((comp.get("base_rewind") or {}).get("similarity_mean") if isinstance(comp.get("base_rewind"), dict) else None),
+        "prm_rewind_similarity_mean": ((comp.get("prm_rewind") or {}).get("similarity_mean") if isinstance(comp.get("prm_rewind"), dict) else None),
+        "base_prm_preservation_rate": ((comp.get("base_prm") or {}).get("preservation_rate") if isinstance(comp.get("base_prm"), dict) else None),
+        "base_rewind_preservation_rate": ((comp.get("base_rewind") or {}).get("preservation_rate") if isinstance(comp.get("base_rewind"), dict) else None),
+        "prm_rewind_preservation_rate": ((comp.get("prm_rewind") or {}).get("preservation_rate") if isinstance(comp.get("prm_rewind"), dict) else None),
+    }]
+    for row in comp.get("rows", []) or []:
+        item = dict(row)
+        item["record_type"] = "step"
+        rows.append(item)
+    return rows
+
+def rewind_axes_jsonl_rows(comp: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = [{
+        "record_type": "summary",
+        "rewind_base_len": comp.get("rewind_base_len"),
+        "rewind_prm_len": comp.get("rewind_prm_len"),
+        "rewind_base_prm_similarity_mean": ((comp.get("rewind_base_prm") or {}).get("similarity_mean") if isinstance(comp.get("rewind_base_prm"), dict) else None),
+        "rewind_base_prm_preservation_rate": ((comp.get("rewind_base_prm") or {}).get("preservation_rate") if isinstance(comp.get("rewind_base_prm"), dict) else None),
+    }]
+    for row in comp.get("rows", []) or []:
         item = dict(row)
         item["record_type"] = "step"
         rows.append(item)
@@ -1826,6 +2277,7 @@ class Trace:
     steps: List[str]
     answer: str
     step_records: Optional[List[Dict[str, Any]]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 @dataclass
 class CurvePoint:
@@ -1843,6 +2295,9 @@ class ExperimentSettings:
     trace_format: str = "auto"              # auto|json|text
     stream_output: bool = False
     temperature_trace: float = 0.0
+    process_reward_mode: str = "off"        # off|lite
+    trace_candidates: int = 1
+    trace_candidate_temperature: float = 0.4
     temperature_reanswer: float = 0.8
     n_samples_baseline: int = 9
     n_samples_per_k: int = 9
@@ -1872,6 +2327,8 @@ class ExperimentSettings:
     rewind_samples_per_depth: int = 0      # 0 -> reuse n_samples_per_k
     rewind_order: str = "reverse"          # reverse|forward
     compute_oracle_tail: bool = True
+    rewind_process_reward_mode: str = "off"  # off|lite
+    rewind_step_candidates: int = 1
     rewind_novelty_max_similarity: float = 0.82
     rewind_novelty_retries: int = 3
     rewind_escape_temperature: float = 0.6
@@ -1918,28 +2375,7 @@ def build_trace_prompt(
         QUESTION=question,
     )
 
-def build_trace(backend: Backend, question: str, settings: ExperimentSettings, seed: int) -> Trace:
-    early_hint = classify_trace_generation_failure(question, "")
-    if early_hint and looks_like_placeholder_question(question):
-        raise RuntimeError(
-            "Trace generation skipped because the question is underspecified.\n"
-            f"{early_hint}"
-        )
-    prompt = build_trace_prompt(
-        question,
-        settings.trace_mode,
-        prompt_version=settings.prompt_version,
-        prompt_family=settings.prompt_family,
-        output_format=resolve_trace_output_format(settings.trace_format, stream_output=settings.stream_output),
-    )
-    raw = emit_streamed_generation(
-        backend,
-        prompt,
-        temperature=settings.temperature_trace,
-        seed=seed,
-        enable_stream=settings.stream_output,
-        label=f"{getattr(backend, 'name', 'backend')} trace (CoT)",
-    )
+def parse_trace_output(question: str, raw: str) -> Trace:
     obj = extract_first_json_object(raw)
     if obj is None:
         obj = extract_trace_payload_fallback(raw)
@@ -1960,6 +2396,175 @@ def build_trace(backend: Backend, question: str, settings: ExperimentSettings, s
     if not steps:
         raise RuntimeError("Trace output had no usable steps.")
     return Trace(steps=steps, answer=answer, step_records=step_records)
+
+def print_trace_preview(trace: Trace, *, label: str, score: Optional[float] = None) -> None:
+    title = f"\n=== {label} ==="
+    if score is not None:
+        title += f" [score={score:.3f}]"
+    print(title, flush=True)
+    for step in trace.steps:
+        print(f"- {step}", flush=True)
+    if trace.answer:
+        print(f"Answer: {trace.answer}", flush=True)
+
+def build_trace_once(
+    backend: Backend,
+    question: str,
+    settings: ExperimentSettings,
+    seed: int,
+    *,
+    temperature: Optional[float] = None,
+    enable_stream: Optional[bool] = None,
+    label: Optional[str] = None,
+) -> Trace:
+    early_hint = classify_trace_generation_failure(question, "")
+    if early_hint and looks_like_placeholder_question(question):
+        raise RuntimeError(
+            "Trace generation skipped because the question is underspecified.\n"
+            f"{early_hint}"
+        )
+    prompt = build_trace_prompt(
+        question,
+        settings.trace_mode,
+        prompt_version=settings.prompt_version,
+        prompt_family=settings.prompt_family,
+        output_format=resolve_trace_output_format(
+            settings.trace_format,
+            stream_output=settings.stream_output if enable_stream is None else bool(enable_stream),
+        ),
+    )
+    raw = emit_streamed_generation(
+        backend,
+        prompt,
+        temperature=(settings.temperature_trace if temperature is None else float(temperature)),
+        seed=seed,
+        enable_stream=settings.stream_output if enable_stream is None else bool(enable_stream),
+        label=label or f"{getattr(backend, 'name', 'backend')} trace (CoT)",
+    )
+    return parse_trace_output(question, raw)
+
+def build_trace(backend: Backend, question: str, settings: ExperimentSettings, seed: int) -> Trace:
+    return build_trace_once(backend, question, settings, seed)
+
+def build_trace_bundle(
+    backend: Backend,
+    question: str,
+    settings: ExperimentSettings,
+    seed: int,
+) -> Dict[str, Any]:
+    base_trace = build_trace_once(
+        backend,
+        question,
+        settings,
+        seed,
+        enable_stream=settings.stream_output,
+        label=f"{getattr(backend, 'name', 'backend')} trace (CoT)",
+    )
+    mode = str(settings.process_reward_mode or "off").strip().lower()
+    if mode != "lite" or settings.trace_candidates <= 1:
+        return {
+            "selected_trace": base_trace,
+            "base_trace": base_trace,
+            "process_reward": None,
+        }
+
+    candidate_rows: List[Dict[str, Any]] = []
+    candidate_traces: Dict[int, Trace] = {}
+    base_reward = score_trace_candidate_lite(question, base_trace)
+    candidate_rows.append({
+        "candidate_index": 0,
+        "status": "ok",
+        "seed": seed,
+        "temperature": float(settings.temperature_trace),
+        "trace": trace_to_payload(base_trace),
+        "process_reward": base_reward,
+    })
+    candidate_traces[0] = base_trace
+
+    candidate_temp = max(float(settings.temperature_trace), float(settings.trace_candidate_temperature))
+    for candidate_index in range(1, max(1, int(settings.trace_candidates))):
+        cand_seed = seed + 10_000 * candidate_index
+        try:
+            cand_trace = build_trace_once(
+                backend,
+                question,
+                settings,
+                cand_seed,
+                temperature=candidate_temp,
+                enable_stream=False,
+                label=None,
+            )
+            cand_reward = score_trace_candidate_lite(question, cand_trace)
+            candidate_rows.append({
+                "candidate_index": candidate_index,
+                "status": "ok",
+                "seed": cand_seed,
+                "temperature": candidate_temp,
+                "trace": trace_to_payload(cand_trace),
+                "process_reward": cand_reward,
+            })
+            candidate_traces[candidate_index] = cand_trace
+        except Exception as e:
+            candidate_rows.append({
+                "candidate_index": candidate_index,
+                "status": "error",
+                "seed": cand_seed,
+                "temperature": candidate_temp,
+                "error": str(e),
+            })
+
+    successful = [row for row in candidate_rows if row.get("status") == "ok"]
+    if not successful:
+        return {
+            "selected_trace": base_trace,
+            "base_trace": base_trace,
+            "process_reward": None,
+        }
+
+    def _candidate_rank_key(row: Dict[str, Any]) -> Tuple[float, float, int]:
+        reward = row.get("process_reward") or {}
+        return (
+            float(reward.get("overall_score", 0.0) or 0.0),
+            float(reward.get("mean_step_score", 0.0) or 0.0),
+            len(((row.get("trace") or {}).get("steps") or [])),
+        )
+
+    selected_row = max(successful, key=_candidate_rank_key)
+    selected_index = int(selected_row.get("candidate_index", 0) or 0)
+    selected_trace = candidate_traces.get(selected_index, base_trace)
+    process_reward = {
+        "mode": "lite",
+        "candidate_count_requested": int(settings.trace_candidates),
+        "candidate_count_ok": len(successful),
+        "selected_candidate_index": selected_index,
+        "base_candidate_index": 0,
+        "base_score": ((candidate_rows[0].get("process_reward") or {}).get("overall_score") if candidate_rows else None),
+        "selected_score": ((selected_row.get("process_reward") or {}).get("overall_score") if selected_row else None),
+        "score_gain_vs_base": (
+            float((selected_row.get("process_reward") or {}).get("overall_score", 0.0) or 0.0)
+            - float((candidate_rows[0].get("process_reward") or {}).get("overall_score", 0.0) or 0.0)
+        ),
+        "candidates": candidate_rows,
+    }
+    selected_trace.metadata = {"process_reward": process_reward}
+    if settings.stream_output:
+        print(
+            f"[trace-prm] selected candidate {selected_index + 1}/{len(successful)} "
+            f"score={float(process_reward.get('selected_score', 0.0) or 0.0):.3f} "
+            f"(base={float(process_reward.get('base_score', 0.0) or 0.0):.3f})",
+            flush=True,
+        )
+        if selected_index != 0:
+            print_trace_preview(
+                selected_trace,
+                label=f"{getattr(backend, 'name', 'backend')} trace (PRM-selected)",
+                score=float(process_reward.get("selected_score", 0.0) or 0.0),
+            )
+    return {
+        "selected_trace": selected_trace,
+        "base_trace": base_trace,
+        "process_reward": process_reward,
+    }
 
 def reanswer_from_prefix(
     backend: Backend,
@@ -2062,14 +2667,21 @@ def recover_rewind_trace(
     steps = trace.steps[: settings.max_steps]
     original_latest_to_earlier = list(reversed(steps))
     recovered_latest_to_earlier: List[str] = []
+    base_recovered_latest_to_earlier: List[str] = []
     raw_recoveries: List[Dict[str, Any]] = []
     recovered_records: List[Dict[str, Any]] = []
     novelty_rows: List[Dict[str, Any]] = []
+    rewind_score_rows: List[Dict[str, Any]] = []
+    rewind_prm_mode = str(settings.rewind_process_reward_mode or "off").strip().lower()
+    generation_calls = 0
+    generation_attempts = 0
 
     for depth in range(1, len(steps) + 1):
         best_candidate: Optional[Dict[str, Any]] = None
         attempt_rows: List[Dict[str, Any]] = []
+        base_candidate_for_depth: Optional[Dict[str, Any]] = None
         for attempt in range(0, settings.rewind_novelty_retries + 1):
+            generation_attempts += 1
             prompt = build_rewind_step_prompt(
                 question,
                 trace.answer,
@@ -2084,38 +2696,75 @@ def recover_rewind_trace(
                 if attempt == 0
                 else max(settings.rewind_escape_temperature, settings.rewind_step_temperature + 0.1 * attempt)
             )
-            with temporary_backend_generation_overrides(
-                backend,
-                top_p=settings.rewind_step_top_p,
-                repetition_penalty=settings.rewind_step_repetition_penalty,
-            ):
-                raw = emit_streamed_generation(
+            candidate_variants: List[Dict[str, Any]] = []
+            n_candidates = int(settings.rewind_step_candidates if rewind_prm_mode == "lite" else 1)
+            for candidate_index in range(max(1, n_candidates)):
+                with temporary_backend_generation_overrides(
                     backend,
-                    prompt,
-                    temperature=step_temp,
-                    seed=run_seed + 700_000 + depth * 100 + attempt,
-                    enable_stream=settings.stream_output,
-                    label=f"{getattr(backend, 'name', 'backend')} rewind step {depth}/{len(steps)} attempt {attempt + 1}",
+                    top_p=settings.rewind_step_top_p,
+                    repetition_penalty=settings.rewind_step_repetition_penalty,
+                ):
+                    raw = emit_streamed_generation(
+                        backend,
+                        prompt,
+                        temperature=step_temp,
+                        seed=run_seed + 700_000 + depth * 1000 + attempt * 100 + candidate_index,
+                        enable_stream=(settings.stream_output and n_candidates <= 1),
+                        label=f"{getattr(backend, 'name', 'backend')} rewind step {depth}/{len(steps)} attempt {attempt + 1}",
+                    )
+                parsed = parse_rewind_step_output(raw)
+                step = parsed["step"] or f"(rewind step {depth} unavailable)"
+                novelty_info = rewind_step_novelty_info(
+                    step,
+                    recovered_latest_to_earlier,
+                    settings.rewind_novelty_max_similarity,
                 )
-            parsed = parse_rewind_step_output(raw)
-            step = parsed["step"] or f"(rewind step {depth} unavailable)"
-            novelty_info = rewind_step_novelty_info(
-                step,
-                recovered_latest_to_earlier,
-                settings.rewind_novelty_max_similarity,
-            )
-            candidate = {
-                "depth": depth,
-                "attempt": attempt + 1,
-                "temperature": step_temp,
-                "step": step,
-                "novelty_annotation": parsed.get("novelty") or "",
-                "why_earlier": parsed.get("why_earlier") or "",
-                "raw_output": raw,
-                **novelty_info,
-            }
+                rewind_reward = score_rewind_candidate_lite(
+                    question,
+                    trace.answer,
+                    step,
+                    recovered_latest_to_earlier,
+                    novelty_annotation=parsed.get("novelty") or "",
+                    why_earlier=parsed.get("why_earlier") or "",
+                )
+                candidate_variants.append({
+                    "depth": depth,
+                    "attempt": attempt + 1,
+                    "candidate_index": candidate_index,
+                    "temperature": step_temp,
+                    "step": step,
+                    "novelty_annotation": parsed.get("novelty") or "",
+                    "why_earlier": parsed.get("why_earlier") or "",
+                    "raw_output": raw,
+                    **novelty_info,
+                    "process_reward": rewind_reward,
+                })
+            generation_calls += len(candidate_variants)
+            if attempt == 0 and candidate_variants:
+                base_candidate_for_depth = candidate_variants[0]
+
+            def _rewind_rank_key(row: Dict[str, Any]) -> Tuple[int, float, float, float]:
+                reward = row.get("process_reward") or {}
+                return (
+                    1 if not row.get("is_fixed_point_candidate") else 0,
+                    float(reward.get("score", 0.0) or 0.0),
+                    float(row.get("novelty", 0.0) or 0.0),
+                    -float(row.get("max_similarity_to_previous", 0.0) or 0.0),
+                )
+
+            candidate = max(candidate_variants, key=_rewind_rank_key)
+            if settings.stream_output and n_candidates > 1:
+                reward = candidate.get("process_reward") or {}
+                print(
+                    f"[rewind-prm] depth={depth} attempt={attempt + 1} "
+                    f"selected candidate {int(candidate.get('candidate_index', 0)) + 1}/{n_candidates} "
+                    f"score={float(reward.get('score', 0.0) or 0.0):.3f} "
+                    f"novelty={float(candidate.get('novelty', 0.0) or 0.0):.3f}",
+                    flush=True,
+                )
+                print(f"- {str(candidate.get('step') or '').strip()}", flush=True)
             attempt_rows.append(candidate)
-            if best_candidate is None or float(candidate["max_similarity_to_previous"]) < float(best_candidate["max_similarity_to_previous"]):
+            if best_candidate is None or _rewind_rank_key(candidate) > _rewind_rank_key(best_candidate):
                 best_candidate = candidate
             if not candidate["is_fixed_point_candidate"]:
                 break
@@ -2134,16 +2783,24 @@ def recover_rewind_trace(
             "closest_previous_step": None,
             "novelty": 1.0,
             "is_fixed_point_candidate": False,
+            "process_reward": {"score": 0.0},
         }
+        base_candidate = base_candidate_for_depth or chosen
         step = str(chosen["step"]).strip() or f"(rewind step {depth} unavailable)"
+        chosen_reward = dict(chosen.get("process_reward") or {})
         recovered_latest_to_earlier.append(step)
+        base_recovered_latest_to_earlier.append(str(base_candidate.get("step") or "").strip() or f"(rewind step {depth} unavailable)")
         recovered_records.append({
             "depth": depth,
             "step": step,
             "attempts_used": len(attempt_rows),
             "selected_attempt": chosen.get("attempt"),
+            "selected_candidate_index": chosen.get("candidate_index"),
             "novelty_annotation": chosen.get("novelty_annotation") or "",
             "why_earlier": chosen.get("why_earlier") or "",
+            "process_reward_score": chosen_reward.get("score"),
+            "process_reward_atomicity": chosen_reward.get("atomicity"),
+            "process_reward_relevance": chosen_reward.get("relevance"),
         })
         novelty_rows.append({
             "depth": depth,
@@ -2156,6 +2813,16 @@ def recover_rewind_trace(
             "is_fixed_point_candidate": bool(chosen.get("is_fixed_point_candidate", False)),
             "selected_attempt": int(chosen.get("attempt", 1) or 1),
         })
+        rewind_score_rows.append({
+            "depth": depth,
+            "step": step,
+            "score": float(chosen_reward.get("score", 0.0) or 0.0),
+            "atomicity": float(chosen_reward.get("atomicity", 0.0) or 0.0),
+            "relevance": float(chosen_reward.get("relevance", 0.0) or 0.0),
+            "answer_leak_penalty": float(chosen_reward.get("answer_leak_penalty", 0.0) or 0.0),
+            "summary_penalty": float(chosen_reward.get("summary_penalty", 0.0) or 0.0),
+            "novelty": float(chosen_reward.get("novelty", 0.0) or 0.0),
+        })
         if settings.save_raw_generations:
             raw_recoveries.append({
                 "depth": depth,
@@ -2164,32 +2831,42 @@ def recover_rewind_trace(
                 "attempts": attempt_rows,
             })
 
-    alignment: List[Dict[str, Any]] = []
-    sims: List[float] = []
-    for j, (orig, rec) in enumerate(zip(original_latest_to_earlier, recovered_latest_to_earlier)):
-        sim = step_semantic_similarity(orig, rec)
-        sims.append(sim)
-        alignment.append({
-            "index_from_end": j + 1,
-            "index_from_start": len(steps) - j,
-            "original_step": orig,
-            "recovered_step": rec,
-            "similarity": sim,
-        })
-
-    tail_n = max(1, int(math.ceil(len(sims) * 0.25))) if sims else 0
+    alignment_summary = summarize_rewind_alignment(original_latest_to_earlier, recovered_latest_to_earlier)
     novelty_summary = summarize_rewind_novelty(
         novelty_rows,
         threshold=settings.rewind_novelty_max_similarity,
     )
+    base_rewind_summary = summarize_rewind_sequence_metrics(
+        question,
+        trace.answer,
+        base_recovered_latest_to_earlier,
+        settings.rewind_novelty_max_similarity,
+    )
+    base_rewind_alignment = summarize_rewind_alignment(original_latest_to_earlier, base_recovered_latest_to_earlier)
+    base_rewind = {
+        "latest_to_earlier": base_recovered_latest_to_earlier,
+        "forward_order": list(reversed(base_recovered_latest_to_earlier)),
+        **base_rewind_summary,
+        **base_rewind_alignment,
+    }
 
     out = {
         "latest_to_earlier": recovered_latest_to_earlier,
         "forward_order": list(reversed(recovered_latest_to_earlier)),
         "step_records": list(reversed(recovered_records)),
-        "alignment": alignment,
-        "loop_closure_mean": mean_or_none(sims),
-        "loop_closure_tail_mean": mean_or_none(sims[:tail_n]) if sims else None,
+        **alignment_summary,
+        "process_reward_mode": rewind_prm_mode,
+        "process_reward_step_candidates": int(settings.rewind_step_candidates if rewind_prm_mode == "lite" else 1),
+        "process_reward_step_scores": rewind_score_rows,
+        "process_reward_mean": mean_or_none([float(row.get("score", 0.0) or 0.0) for row in rewind_score_rows]),
+        "process_reward_base_mean": base_rewind.get("process_reward_mean"),
+        "process_reward_score_gain_vs_base": (
+            float(mean_or_none([float(row.get("score", 0.0) or 0.0) for row in rewind_score_rows]) or 0.0)
+            - float(base_rewind.get("process_reward_mean", 0.0) or 0.0)
+        ),
+        "generation_calls": generation_calls,
+        "generation_attempts": generation_attempts,
+        "base_rewind": base_rewind,
         **novelty_summary,
     }
     if settings.save_raw_generations:
@@ -2301,6 +2978,7 @@ def compute_tail_curve(
         "label": label,
         "depth_max": D,
         "order": settings.rewind_order,
+        "answer_calls": (D + 1) * n_samples,
         "converge_depth": converge_depth,
         "collapse_depth": collapse_depth,
         "stabilization_max_slope": max_slope,
@@ -2323,11 +3001,15 @@ def compute_rewind_bundle(
     forward_result: Dict[str, Any],
     run_seed: int,
 ) -> Dict[str, Any]:
+    t_bundle = time.perf_counter()
     baseline_A_star = str(forward_result.get("A_star", ""))
     baseline_distribution = dict(forward_result.get("baseline_distribution", {}) or {})
     original_latest_to_earlier = list(reversed(trace.steps[: settings.max_steps]))
 
+    t0 = time.perf_counter()
     rewind_trace = recover_rewind_trace(backend, question, trace, settings, run_seed=run_seed + 50_000)
+    rewind_trace_s = time.perf_counter() - t0
+    t0 = time.perf_counter()
     rewind_curve = compute_tail_curve(
         backend, question, rewind_trace["latest_to_earlier"], settings,
         run_seed=run_seed + 60_000,
@@ -2335,9 +3017,12 @@ def compute_rewind_bundle(
         baseline_distribution=baseline_distribution,
         label="recovered_rewind_tail",
     )
+    rewind_curve_s = time.perf_counter() - t0
 
     oracle_tail_curve = None
+    oracle_tail_curve_s = 0.0
     if settings.compute_oracle_tail:
+        t0 = time.perf_counter()
         oracle_tail_curve = compute_tail_curve(
             backend, question, original_latest_to_earlier, settings,
             run_seed=run_seed + 70_000,
@@ -2345,6 +3030,7 @@ def compute_rewind_bundle(
             baseline_distribution=baseline_distribution,
             label="oracle_original_tail",
         )
+        oracle_tail_curve_s = time.perf_counter() - t0
 
     forward_curve = forward_result.get("curve", []) or []
     rewind_curve_points = rewind_curve.get("curve", []) or []
@@ -2365,6 +3051,23 @@ def compute_rewind_bundle(
             gaps = [float(o.get("match_rate", 0.0)) - float(r.get("match_rate", 0.0)) for o, r in zip(oc, rc)]
             oracle_recovery_gap_mean = mean_or_none(gaps)
     rewind_core = compute_rewind_core_metrics(rewind_trace, rewind_curve)
+    rewind_workload = {
+        "rewind_trace_generation_calls": rewind_trace.get("generation_calls"),
+        "rewind_trace_attempts": rewind_trace.get("generation_attempts"),
+        "rewind_tail_answer_calls": rewind_curve.get("answer_calls"),
+        "oracle_tail_answer_calls": (oracle_tail_curve.get("answer_calls") if isinstance(oracle_tail_curve, dict) else 0),
+    }
+    rewind_workload["rewind_total_generation_calls"] = (
+        int(rewind_workload.get("rewind_trace_generation_calls") or 0)
+        + int(rewind_workload.get("rewind_tail_answer_calls") or 0)
+        + int(rewind_workload.get("oracle_tail_answer_calls") or 0)
+    )
+    rewind_timings = {
+        "rewind_trace_s": rewind_trace_s,
+        "rewind_curve_s": rewind_curve_s,
+        "oracle_tail_curve_s": oracle_tail_curve_s,
+        "rewind_total_s": time.perf_counter() - t_bundle,
+    }
 
     return {
         "rewind_enabled": True,
@@ -2376,6 +3079,8 @@ def compute_rewind_bundle(
         "oracle_recovery_gap_auc": oracle_recovery_gap_auc,
         "oracle_recovery_gap_mean": oracle_recovery_gap_mean,
         "rewind_core": rewind_core,
+        "rewind_workload": rewind_workload,
+        "rewind_timings_s": rewind_timings,
     }
 
 
@@ -3520,6 +4225,101 @@ def summarize_rewind_core_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
         "rewind_core_strength": core.get("core_strength"),
     }
 
+def summarize_rewind_process_reward_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+    rewind_trace = res.get("rewind_trace") or {}
+    if not isinstance(rewind_trace, dict):
+        return {
+            "rewind_process_reward_mode": None,
+            "rewind_step_candidate_count": None,
+            "rewind_process_reward_mean": None,
+            "rewind_base_process_reward_mean": None,
+            "rewind_process_reward_score_gain_vs_base": None,
+        }
+    return {
+        "rewind_process_reward_mode": rewind_trace.get("process_reward_mode"),
+        "rewind_step_candidate_count": rewind_trace.get("process_reward_step_candidates"),
+        "rewind_process_reward_mean": rewind_trace.get("process_reward_mean"),
+        "rewind_base_process_reward_mean": rewind_trace.get("process_reward_base_mean"),
+        "rewind_process_reward_score_gain_vs_base": rewind_trace.get("process_reward_score_gain_vs_base"),
+    }
+
+def summarize_rewind_axes_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+    comp = res.get("rewind_axes") or {}
+    if not isinstance(comp, dict):
+        return {
+            "rewind_axis_base_prm_similarity_mean": None,
+            "rewind_axis_base_prm_preservation_rate": None,
+        }
+    base_prm = comp.get("rewind_base_prm") or {}
+    return {
+        "rewind_axis_base_prm_similarity_mean": (base_prm.get("similarity_mean") if isinstance(base_prm, dict) else None),
+        "rewind_axis_base_prm_preservation_rate": (base_prm.get("preservation_rate") if isinstance(base_prm, dict) else None),
+    }
+
+def summarize_runtime_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+    stage = res.get("stage_timings_s") or {}
+    rewind_timings = res.get("rewind_timings_s") or {}
+    rewind_workload = res.get("rewind_workload") or {}
+    return {
+        "time_trace_build_s": (stage.get("trace_build_s") if isinstance(stage, dict) else None),
+        "time_forward_curve_s": (stage.get("forward_curve_s") if isinstance(stage, dict) else None),
+        "time_rewind_total_s": (rewind_timings.get("rewind_total_s") if isinstance(rewind_timings, dict) else stage.get("rewind_total_s") if isinstance(stage, dict) else None),
+        "time_rewind_trace_s": (rewind_timings.get("rewind_trace_s") if isinstance(rewind_timings, dict) else None),
+        "time_rewind_curve_s": (rewind_timings.get("rewind_curve_s") if isinstance(rewind_timings, dict) else None),
+        "time_oracle_tail_curve_s": (rewind_timings.get("oracle_tail_curve_s") if isinstance(rewind_timings, dict) else None),
+        "time_bridge_total_s": (stage.get("bridge_total_s") if isinstance(stage, dict) else None),
+        "time_permutation_tests_s": (stage.get("permutation_tests_s") if isinstance(stage, dict) else None),
+        "time_total_s": (stage.get("total_s") if isinstance(stage, dict) else None),
+        "rewind_trace_generation_calls": (rewind_workload.get("rewind_trace_generation_calls") if isinstance(rewind_workload, dict) else None),
+        "rewind_trace_attempts": (rewind_workload.get("rewind_trace_attempts") if isinstance(rewind_workload, dict) else None),
+        "rewind_tail_answer_calls": (rewind_workload.get("rewind_tail_answer_calls") if isinstance(rewind_workload, dict) else None),
+        "oracle_tail_answer_calls": (rewind_workload.get("oracle_tail_answer_calls") if isinstance(rewind_workload, dict) else None),
+        "rewind_total_generation_calls": (rewind_workload.get("rewind_total_generation_calls") if isinstance(rewind_workload, dict) else None),
+    }
+
+def summarize_process_reward_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+    prm = res.get("trace_process_reward") or {}
+    if not isinstance(prm, dict):
+        return {
+            "process_reward_mode": None,
+            "trace_candidate_count": None,
+            "trace_selected_candidate_index": None,
+            "trace_base_score": None,
+            "trace_selected_score": None,
+            "trace_score_gain_vs_base": None,
+        }
+    return {
+        "process_reward_mode": prm.get("mode"),
+        "trace_candidate_count": prm.get("candidate_count_ok"),
+        "trace_selected_candidate_index": prm.get("selected_candidate_index"),
+        "trace_base_score": prm.get("base_score"),
+        "trace_selected_score": prm.get("selected_score"),
+        "trace_score_gain_vs_base": prm.get("score_gain_vs_base"),
+    }
+
+def summarize_trace_axes_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+    comp = res.get("trace_axes") or {}
+    if not isinstance(comp, dict):
+        return {
+            "trace_axis_base_prm_similarity_mean": None,
+            "trace_axis_base_prm_preservation_rate": None,
+            "trace_axis_base_rewind_similarity_mean": None,
+            "trace_axis_base_rewind_preservation_rate": None,
+            "trace_axis_prm_rewind_similarity_mean": None,
+            "trace_axis_prm_rewind_preservation_rate": None,
+        }
+    base_prm = comp.get("base_prm") or {}
+    base_rewind = comp.get("base_rewind") or {}
+    prm_rewind = comp.get("prm_rewind") or {}
+    return {
+        "trace_axis_base_prm_similarity_mean": (base_prm.get("similarity_mean") if isinstance(base_prm, dict) else None),
+        "trace_axis_base_prm_preservation_rate": (base_prm.get("preservation_rate") if isinstance(base_prm, dict) else None),
+        "trace_axis_base_rewind_similarity_mean": (base_rewind.get("similarity_mean") if isinstance(base_rewind, dict) else None),
+        "trace_axis_base_rewind_preservation_rate": (base_rewind.get("preservation_rate") if isinstance(base_rewind, dict) else None),
+        "trace_axis_prm_rewind_similarity_mean": (prm_rewind.get("similarity_mean") if isinstance(prm_rewind, dict) else None),
+        "trace_axis_prm_rewind_preservation_rate": (prm_rewind.get("preservation_rate") if isinstance(prm_rewind, dict) else None),
+    }
+
 # ----------------------------- config & IO -----------------------------
 
 def load_config(path: str) -> Dict[str, Any]:
@@ -3604,6 +4404,9 @@ def parse_experiment_settings(cfg: Dict[str, Any]) -> ExperimentSettings:
         trace_format=str(e.get("trace_format", "auto")),
         stream_output=bool(e.get("stream_output", False)),
         temperature_trace=float(e.get("temperature_trace", 0.0)),
+        process_reward_mode=str(e.get("process_reward_mode", "off")),
+        trace_candidates=int(e.get("trace_candidates", 1)),
+        trace_candidate_temperature=float(e.get("trace_candidate_temperature", 0.4)),
         temperature_reanswer=float(e.get("temperature_reanswer", 0.8)),
         n_samples_baseline=int(e.get("n_samples_baseline", 9)),
         n_samples_per_k=int(e.get("n_samples_per_k", 9)),
@@ -3631,6 +4434,8 @@ def parse_experiment_settings(cfg: Dict[str, Any]) -> ExperimentSettings:
         rewind_samples_per_depth=int(e.get("rewind_samples_per_depth", 0)),
         rewind_order=str(e.get("rewind_order", "reverse")),
         compute_oracle_tail=bool(e.get("compute_oracle_tail", True)),
+        rewind_process_reward_mode=str(e.get("rewind_process_reward_mode", "off")),
+        rewind_step_candidates=int(e.get("rewind_step_candidates", 1)),
         rewind_novelty_max_similarity=float(e.get("rewind_novelty_max_similarity", 0.82)),
         rewind_novelty_retries=int(e.get("rewind_novelty_retries", 3)),
         rewind_escape_temperature=float(e.get("rewind_escape_temperature", 0.6)),
@@ -3661,7 +4466,12 @@ def parse_experiment_settings(cfg: Dict[str, Any]) -> ExperimentSettings:
     s.collapse_min_run = max(1, s.collapse_min_run)
     s.prompt_version, s.prompt_family = normalize_prompt_selector(s.prompt_version, s.prompt_family)
     s.trace_format = normalize_trace_output_format(s.trace_format)
+    s.process_reward_mode = s.process_reward_mode if s.process_reward_mode in ("off", "lite") else "off"
+    s.trace_candidates = max(1, s.trace_candidates)
+    s.trace_candidate_temperature = max(0.0, s.trace_candidate_temperature)
     s.rewind_order = s.rewind_order if s.rewind_order in ("reverse", "forward") else "reverse"
+    s.rewind_process_reward_mode = s.rewind_process_reward_mode if s.rewind_process_reward_mode in ("off", "lite") else "off"
+    s.rewind_step_candidates = max(1, s.rewind_step_candidates)
     s.rewind_samples_per_depth = max(0, s.rewind_samples_per_depth)
     s.rewind_novelty_max_similarity = max(0.0, min(1.0, s.rewind_novelty_max_similarity))
     s.rewind_novelty_retries = max(0, s.rewind_novelty_retries)
@@ -3802,6 +4612,88 @@ def plot_run(run_dir: str) -> None:
                 plt.savefig(os.path.join(plots_dir, f"{base}__trace_vs_rewind_similarity.png"), dpi=160)
                 plt.close()
 
+        trace_axes = obj.get("trace_axes")
+        if isinstance(trace_axes, dict):
+            rows = trace_axes.get("rows") or []
+            if rows:
+                idx = [int(row.get("index", i)) for i, row in enumerate(rows)]
+                base_prm = [float(row["base_prm_similarity"]) if row.get("base_prm_similarity") is not None else float("nan") for row in rows]
+                base_rewind = [float(row["base_rewind_similarity"]) if row.get("base_rewind_similarity") is not None else float("nan") for row in rows]
+                prm_rewind = [float(row["prm_rewind_similarity"]) if row.get("prm_rewind_similarity") is not None else float("nan") for row in rows]
+                process_reward = obj.get("trace_process_reward") or {}
+                base_score_points: List[Tuple[int, float]] = []
+                prm_score_points: List[Tuple[int, float]] = []
+                if isinstance(process_reward, dict):
+                    base_idx = int(process_reward.get("base_candidate_index", 0) or 0)
+                    selected_idx = int(process_reward.get("selected_candidate_index", 0) or 0)
+                    for cand in process_reward.get("candidates", []) or []:
+                        if not isinstance(cand, dict) or cand.get("status") != "ok":
+                            continue
+                        step_scores = ((cand.get("process_reward") or {}).get("step_scores") if isinstance(cand.get("process_reward"), dict) else None) or []
+                        points = [(i, float(row.get("score", 0.0) or 0.0)) for i, row in enumerate(step_scores)]
+                        if int(cand.get("candidate_index", -1) or -1) == base_idx:
+                            base_score_points = points
+                        if int(cand.get("candidate_index", -1) or -1) == selected_idx:
+                            prm_score_points = points
+                plt.figure()
+                plt.plot(idx, base_prm, marker="o", label="base_vs_prm")
+                plt.plot(idx, base_rewind, marker="s", label="base_vs_rewind")
+                plt.plot(idx, prm_rewind, marker="^", label="prm_vs_rewind")
+                if base_score_points:
+                    plt.plot([x for x, _ in base_score_points], [y for _, y in base_score_points], linestyle="--", marker=".", alpha=0.8, label="base_step_score")
+                if prm_score_points:
+                    plt.plot([x for x, _ in prm_score_points], [y for _, y in prm_score_points], linestyle="--", marker="x", alpha=0.8, label="prm_step_score")
+                plt.ylim(0.0, 1.0)
+                plt.xlabel("step index")
+                plt.ylabel("similarity")
+                plt.title(f"{base} trace axes")
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(os.path.join(plots_dir, f"{base}__trace_axes_similarity.png"), dpi=160)
+                plt.close()
+
+        rewind_axes = obj.get("rewind_axes")
+        if isinstance(rewind_axes, dict):
+            rows = rewind_axes.get("rows") or []
+            if rows:
+                idx = [int(row.get("index", i)) for i, row in enumerate(rows)]
+                sims = [float(row["rewind_base_prm_similarity"]) if row.get("rewind_base_prm_similarity") is not None else float("nan") for row in rows]
+                rewind_trace_obj = obj.get("rewind_trace") or {}
+                base_rewind_obj = (rewind_trace_obj.get("base_rewind") or {}) if isinstance(rewind_trace_obj, dict) else {}
+                base_scores = [float(row.get("score", 0.0) or 0.0) for row in (base_rewind_obj.get("process_reward_step_scores") or [])]
+                prm_scores = [float(row.get("score", 0.0) or 0.0) for row in (rewind_trace_obj.get("process_reward_step_scores") or [])] if isinstance(rewind_trace_obj, dict) else []
+                plt.figure()
+                plt.plot(idx, sims, marker="o", label="rewind_base_vs_prm")
+                if base_scores:
+                    plt.plot(idx[:len(base_scores)], base_scores, linestyle="--", marker=".", alpha=0.8, label="rewind_base_step_score")
+                if prm_scores:
+                    plt.plot(idx[:len(prm_scores)], prm_scores, linestyle="--", marker="x", alpha=0.8, label="rewind_prm_step_score")
+                plt.ylim(0.0, 1.0)
+                plt.xlabel("rewind step index")
+                plt.ylabel("similarity / score")
+                plt.title(f"{base} rewind axes")
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(os.path.join(plots_dir, f"{base}__rewind_axes_similarity.png"), dpi=160)
+                plt.close()
+
+        process_reward = obj.get("trace_process_reward")
+        if isinstance(process_reward, dict):
+            candidates = [c for c in (process_reward.get("candidates") or []) if isinstance(c, dict) and c.get("status") == "ok"]
+            if candidates:
+                xs = [int(c.get("candidate_index", i) or i) for i, c in enumerate(candidates)]
+                ys = [float(((c.get("process_reward") or {}).get("overall_score")) or 0.0) for c in candidates]
+                selected_idx = int(process_reward.get("selected_candidate_index", -1) or -1)
+                colors = ["tab:orange" if x == selected_idx else "tab:blue" for x in xs]
+                plt.figure()
+                plt.bar(xs, ys, color=colors)
+                plt.xlabel("trace candidate")
+                plt.ylabel("PRM-lite score")
+                plt.title(f"{base} trace candidate scores")
+                plt.tight_layout()
+                plt.savefig(os.path.join(plots_dir, f"{base}__trace_candidate_scores.png"), dpi=160)
+                plt.close()
+
         rewind_trace_obj = obj.get("rewind_trace") or {}
         novelty_curve = rewind_trace_obj.get("novelty_curve") or []
         if not novelty_curve and (rewind_trace_obj.get("latest_to_earlier") or []):
@@ -3822,11 +4714,14 @@ def plot_run(run_dir: str) -> None:
             depths = [int(row.get("depth", i + 1) or (i + 1)) for i, row in enumerate(novelty_curve)]
             novelty = [float(row.get("novelty", 0.0) or 0.0) for row in novelty_curve]
             max_sim = [float(row.get("max_similarity_to_previous", 0.0) or 0.0) for row in novelty_curve]
+            rewind_scores = [float(row.get("score", 0.0) or 0.0) for row in (rewind_trace_obj.get("process_reward_step_scores") or [])]
             threshold = float(rewind_trace_obj.get("novelty_threshold", 0.82) or 0.82)
             fixed_depth = rewind_trace_obj.get("fixed_point_depth")
             plt.figure()
             plt.plot(depths, novelty, marker="o", label="novelty")
             plt.plot(depths, max_sim, marker="s", label="max_similarity_to_previous")
+            if rewind_scores:
+                plt.plot(depths[:len(rewind_scores)], rewind_scores, marker="^", linestyle="--", label="rewind_step_score")
             plt.axhline(1.0 - threshold, linestyle="--", color="tab:orange", label="novelty_threshold")
             if fixed_depth is not None:
                 plt.axvline(int(fixed_depth), linestyle=":", color="tab:red", label="fixed_point_depth")
@@ -3958,6 +4853,8 @@ def run_one_backend_one_question(
     trace_file: Optional[str] = None,
     run_seed: int = 42
 ) -> Dict[str, Any]:
+    t_total = time.perf_counter()
+    stage_timings: Dict[str, float] = {}
     generation_logger: Optional[GenerationLogger] = None
     active_backend = backend
     if settings.save_generation_log_jsonl:
@@ -3972,6 +4869,8 @@ def run_one_backend_one_question(
 
     # trace source
     trace: Trace
+    base_trace: Optional[Trace] = None
+    process_reward: Optional[Dict[str, Any]] = None
     if trace_file:
         obj = read_json(trace_file)
         raw_steps = obj.get("step_records") if isinstance(obj.get("step_records"), list) else obj.get("steps", [])
@@ -3983,28 +4882,47 @@ def run_one_backend_one_question(
         )
     elif shared_trace is not None:
         trace = shared_trace
+        process_reward = dict((trace.metadata or {}).get("process_reward") or {}) if isinstance((trace.metadata or {}).get("process_reward"), dict) else None
     else:
-        trace = build_trace(active_backend, question, settings, seed=run_seed + 123)
+        t0 = time.perf_counter()
+        trace_bundle = build_trace_bundle(active_backend, question, settings, seed=run_seed + 123)
+        stage_timings["trace_build_s"] = time.perf_counter() - t0
+        trace = trace_bundle["selected_trace"]
+        base_trace = trace_bundle.get("base_trace")
+        process_reward = trace_bundle.get("process_reward")
 
+    if base_trace is None and process_reward:
+        for candidate in process_reward.get("candidates", []) or []:
+            if int(candidate.get("candidate_index", -1) or -1) == int(process_reward.get("base_candidate_index", 0) or 0):
+                payload = candidate.get("trace") or {}
+                if isinstance(payload, dict):
+                    base_trace = trace_from_payload(payload)
+                break
+
+    t0 = time.perf_counter()
     res = compute_curve(active_backend, question, trace, settings, run_seed=run_seed + 1000)
+    stage_timings["forward_curve_s"] = time.perf_counter() - t0
     res["backend"] = getattr(backend, "name", "backend")
     res["runtime_backend"] = getattr(backend, "runtime_backend", getattr(active_backend, "runtime_backend", None))
     res["question_id"] = qid
     res["question"] = question
-    res["trace"] = {
-        "steps": trace.steps[: settings.max_steps],
-        "step_records": (trace.step_records or [])[: settings.max_steps],
-        "answer": trace.answer,
-    }
+    res["trace"] = trace_to_payload(trace)
     res["trace_mode"] = settings.trace_mode
     res["trace_format"] = resolve_trace_output_format(settings.trace_format, stream_output=settings.stream_output)
     res["trace_source"] = settings.trace_source
     res["prompt_version"] = settings.prompt_version
     res["prompt_family"] = settings.prompt_family
+    if process_reward is not None:
+        res["trace_process_reward"] = process_reward
+        if base_trace is not None:
+            res["base_trace"] = trace_to_payload(base_trace)
+        res["prm_trace"] = trace_to_payload(trace)
 
     if settings.enable_rewind:
         try:
+            t0 = time.perf_counter()
             rewind_bundle = compute_rewind_bundle(active_backend, question, trace, settings, res, run_seed=run_seed + 20_000)
+            stage_timings["rewind_total_s"] = time.perf_counter() - t0
             res.update(rewind_bundle)
         except Exception as e:
             res["rewind_enabled"] = False
@@ -4012,7 +4930,9 @@ def run_one_backend_one_question(
 
     if settings.enable_bridge:
         try:
+            t0 = time.perf_counter()
             bridge_bundle = compute_bridge_bundles(active_backend, question, trace, settings, res, run_seed=run_seed + 30_000)
+            stage_timings["bridge_total_s"] = time.perf_counter() - t0
             res.update(bridge_bundle)
         except Exception as e:
             res["bridge_enabled"] = False
@@ -4020,12 +4940,28 @@ def run_one_backend_one_question(
 
     # permutation tests
     if settings.permutation_tests > 0:
+        t0 = time.perf_counter()
         res["permutations"] = run_permutation_tests(active_backend, question, trace, settings, run_seed=run_seed + 5000)
+        stage_timings["permutation_tests_s"] = time.perf_counter() - t0
 
     rewind_trace_obj = res.get("rewind_trace")
     trace_vs_rewind = compare_forward_and_rewind_steps(trace.steps[: settings.max_steps], rewind_trace_obj) if isinstance(rewind_trace_obj, dict) else None
     if trace_vs_rewind is not None:
         res["trace_vs_rewind"] = trace_vs_rewind
+    trace_axes = None
+    if process_reward is not None and base_trace is not None and isinstance(rewind_trace_obj, dict):
+        trace_axes = build_three_axis_trace_comparison(base_trace, trace, rewind_trace_obj)
+        if trace_axes is not None:
+            res["trace_axes"] = trace_axes
+    rewind_axes = build_rewind_axis_comparison(rewind_trace_obj) if isinstance(rewind_trace_obj, dict) else None
+    if rewind_axes is not None:
+        res["rewind_axes"] = rewind_axes
+    if "trace_build_s" not in stage_timings:
+        stage_timings["trace_build_s"] = 0.0
+    res["stage_timings_s"] = {
+        **stage_timings,
+        "total_s": time.perf_counter() - t_total,
+    }
 
     # persist
     out_path = os.path.join(out_dir, f"{backend.name}__{qid}.json")
@@ -4039,6 +4975,16 @@ def run_one_backend_one_question(
         compare_path = os.path.join(out_dir, f"{backend.name}__{qid}__trace_vs_rewind.jsonl")
         write_jsonl(compare_path, trace_vs_rewind_jsonl_rows(trace_vs_rewind))
         res["trace_vs_rewind_jsonl"] = os.path.basename(compare_path)
+        write_json(out_path, res)
+    if trace_axes is not None:
+        axes_path = os.path.join(out_dir, f"{backend.name}__{qid}__trace_axes.jsonl")
+        write_jsonl(axes_path, trace_axes_jsonl_rows(trace_axes))
+        res["trace_axes_jsonl"] = os.path.basename(axes_path)
+        write_json(out_path, res)
+    if rewind_axes is not None:
+        rewind_axes_path = os.path.join(out_dir, f"{backend.name}__{qid}__rewind_axes.jsonl")
+        write_jsonl(rewind_axes_path, rewind_axes_jsonl_rows(rewind_axes))
+        res["rewind_axes_jsonl"] = os.path.basename(rewind_axes_path)
         write_json(out_path, res)
     return res
 
@@ -4090,12 +5036,12 @@ def run_experiment(config_path: str) -> str:
         if shared_trace_backend_name:
             # build shared trace using the specified backend for THIS question
             b0 = next(b for b in backends if b.name == shared_trace_backend_name)
-            per_question_shared_trace = build_trace(
+            per_question_shared_trace = build_trace_bundle(
                 b0,
                 qtext,
                 settings,
                 seed=12345 + int(sha1(qid)[:6], 16) % 100000,
-            )
+            )["selected_trace"]
 
         for b in backends:
             # per backend seed for reproducibility
@@ -4156,7 +5102,12 @@ def run_experiment(config_path: str) -> str:
             row.update(summarize_bridge_for_summary(res, "bridge_recovered"))
             row.update(summarize_bridge_for_summary(res, "bridge_oracle"))
             row.update(summarize_trace_vs_rewind_for_summary(res))
+            row.update(summarize_process_reward_for_summary(res))
+            row.update(summarize_trace_axes_for_summary(res))
             row.update(summarize_rewind_core_for_summary(res))
+            row.update(summarize_rewind_process_reward_for_summary(res))
+            row.update(summarize_rewind_axes_for_summary(res))
+            row.update(summarize_runtime_for_summary(res))
             summary_rows.append(row)
 
     # write summary CSV
@@ -4189,6 +5140,9 @@ def run_quick_hf(args: argparse.Namespace) -> str:
         trace_format=args.trace_format,
         stream_output=args.stream_output,
         temperature_trace=args.temp_trace,
+        process_reward_mode=args.process_reward_mode,
+        trace_candidates=args.trace_candidates,
+        trace_candidate_temperature=args.trace_candidate_temperature,
         temperature_reanswer=args.temp_reanswer,
         n_samples_baseline=args.n_baseline,
         n_samples_per_k=args.n_per_k,
@@ -4216,6 +5170,8 @@ def run_quick_hf(args: argparse.Namespace) -> str:
         rewind_samples_per_depth=args.rewind_samples_per_depth,
         rewind_order=args.rewind_order,
         compute_oracle_tail=not args.no_oracle_tail,
+        rewind_process_reward_mode=args.rewind_process_reward_mode,
+        rewind_step_candidates=args.rewind_step_candidates,
         rewind_novelty_max_similarity=args.rewind_novelty_max_similarity,
         rewind_novelty_retries=args.rewind_novelty_retries,
         rewind_escape_temperature=args.rewind_escape_temp,
@@ -4308,7 +5264,12 @@ def run_quick_hf(args: argparse.Namespace) -> str:
     summary_row.update(summarize_bridge_for_summary(res, "bridge_recovered"))
     summary_row.update(summarize_bridge_for_summary(res, "bridge_oracle"))
     summary_row.update(summarize_trace_vs_rewind_for_summary(res))
+    summary_row.update(summarize_process_reward_for_summary(res))
+    summary_row.update(summarize_trace_axes_for_summary(res))
     summary_row.update(summarize_rewind_core_for_summary(res))
+    summary_row.update(summarize_rewind_process_reward_for_summary(res))
+    summary_row.update(summarize_rewind_axes_for_summary(res))
+    summary_row.update(summarize_runtime_for_summary(res))
     write_text(os.path.join(out_dir, "summary.csv"), to_csv([summary_row]))
     print(f"[quick-hf] saved: {out_dir}")
     return out_dir
@@ -4320,6 +5281,9 @@ def run_quick_http(args: argparse.Namespace) -> str:
         trace_format=args.trace_format,
         stream_output=args.stream_output,
         temperature_trace=args.temp_trace,
+        process_reward_mode=args.process_reward_mode,
+        trace_candidates=args.trace_candidates,
+        trace_candidate_temperature=args.trace_candidate_temperature,
         temperature_reanswer=args.temp_reanswer,
         n_samples_baseline=args.n_baseline,
         n_samples_per_k=args.n_per_k,
@@ -4347,6 +5311,8 @@ def run_quick_http(args: argparse.Namespace) -> str:
         rewind_samples_per_depth=args.rewind_samples_per_depth,
         rewind_order=args.rewind_order,
         compute_oracle_tail=not args.no_oracle_tail,
+        rewind_process_reward_mode=args.rewind_process_reward_mode,
+        rewind_step_candidates=args.rewind_step_candidates,
         rewind_novelty_max_similarity=args.rewind_novelty_max_similarity,
         rewind_novelty_retries=args.rewind_novelty_retries,
         rewind_escape_temperature=args.rewind_escape_temp,
@@ -4428,7 +5394,12 @@ def run_quick_http(args: argparse.Namespace) -> str:
     summary_row.update(summarize_bridge_for_summary(res, "bridge_recovered"))
     summary_row.update(summarize_bridge_for_summary(res, "bridge_oracle"))
     summary_row.update(summarize_trace_vs_rewind_for_summary(res))
+    summary_row.update(summarize_process_reward_for_summary(res))
+    summary_row.update(summarize_trace_axes_for_summary(res))
     summary_row.update(summarize_rewind_core_for_summary(res))
+    summary_row.update(summarize_rewind_process_reward_for_summary(res))
+    summary_row.update(summarize_rewind_axes_for_summary(res))
+    summary_row.update(summarize_runtime_for_summary(res))
     write_text(os.path.join(out_dir, "summary.csv"), to_csv([summary_row]))
     print(f"[quick] saved: {out_dir}")
     return out_dir
@@ -4468,6 +5439,9 @@ experiment:
   trace_format: auto               # auto | json | text
   stream_output: false
   temperature_trace: 0.0
+  process_reward_mode: off         # off | lite
+  trace_candidates: 1
+  trace_candidate_temperature: 0.4
   temperature_reanswer: 0.8
   n_samples_baseline: 9
   n_samples_per_k: 9
@@ -4497,6 +5471,8 @@ experiment:
   rewind_samples_per_depth: 0   # 0 -> reuse n_samples_per_k
   rewind_order: reverse         # reverse or forward
   compute_oracle_tail: true
+  rewind_process_reward_mode: off   # off | lite
+  rewind_step_candidates: 1
   rewind_novelty_max_similarity: 0.82
   rewind_novelty_retries: 3
   rewind_escape_temperature: 0.6
@@ -4537,6 +5513,9 @@ def add_common_curve_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--trace-format", default="auto", choices=["auto", "json", "text"], help="Trace/rewind prompt format. 'auto' uses text when --stream-output is enabled, otherwise json.")
     p.add_argument("--stream-output", action="store_true", help="Print streamed CoT first, then rewind recovery, while still saving JSON/JSONL/plots.")
     p.add_argument("--temp-trace", type=float, default=0.0)
+    p.add_argument("--process-reward-mode", default="off", choices=["off", "lite"], help="Pseudo-PRM mode for reranking multiple forward trace candidates before downstream evaluation.")
+    p.add_argument("--trace-candidates", type=int, default=1, help="How many forward trace candidates to generate before PRM-lite reranking.")
+    p.add_argument("--trace-candidate-temperature", type=float, default=0.4, help="Temperature for additional forward trace candidates used in PRM-lite reranking.")
     p.add_argument("--temp-reanswer", type=float, default=0.8)
     p.add_argument("--n-baseline", type=int, default=9)
     p.add_argument("--n-per-k", type=int, default=9)
@@ -4569,6 +5548,8 @@ def add_common_curve_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--rewind-samples-per-depth", type=int, default=0, help="0 -> reuse --n-per-k")
     p.add_argument("--rewind-order", choices=["reverse", "forward"], default="reverse")
     p.add_argument("--no-oracle-tail", action="store_true", help="Skip oracle tail curve from original final steps.")
+    p.add_argument("--rewind-process-reward-mode", default="off", choices=["off", "lite"], help="Pseudo-PRM mode for reranking multiple rewind-step candidates at each depth.")
+    p.add_argument("--rewind-step-candidates", type=int, default=1, help="How many rewind-step candidates to sample per depth before PRM-lite reranking.")
     p.add_argument("--rewind-novelty-max-similarity", type=float, default=0.82)
     p.add_argument("--rewind-novelty-retries", type=int, default=3)
     p.add_argument("--rewind-escape-temp", type=float, default=0.6)

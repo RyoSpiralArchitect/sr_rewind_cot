@@ -6,7 +6,6 @@ import sys
 import types
 import unittest
 import uuid
-from importlib import import_module
 from pathlib import Path
 from unittest import mock
 
@@ -95,11 +94,6 @@ class TestHFLocalBackendPathResolution(unittest.TestCase):
 
 
 class TestNamingAndPromptAssets(unittest.TestCase):
-    def test_legacy_wrapper_still_exports_core_symbols(self) -> None:
-        legacy = import_module("spiral_patapi_bridge_core")
-        self.assertIs(legacy.HFLocalBackend, spbc.HFLocalBackend)
-        self.assertTrue(callable(legacy.main))
-
     def test_v1_prompt_templates_render_from_assets_folder(self) -> None:
         prompt = spbc.build_trace_prompt("Find the pattern.", "masked")
         self.assertIn("STRICT JSON", prompt)

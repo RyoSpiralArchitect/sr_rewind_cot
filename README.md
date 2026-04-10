@@ -60,7 +60,6 @@ In many runs, "failure" is still informative. A rewind operator that falls into 
 ## Repository Layout
 
 - [sr_rewind_cot.py](./sr_rewind_cot.py): main CLI and research harness
-- [spiral_patapi_bridge_core.py](./spiral_patapi_bridge_core.py): backward-compatible wrapper
 - [sr_rewind_cot_assets/prompts](./sr_rewind_cot_assets/prompts): external prompt templates and task-family guidance
 - [tests/test_sr_rewind_cot.py](./tests/test_sr_rewind_cot.py): targeted regression tests for parsing, rewind behavior, streaming, and metrics
 

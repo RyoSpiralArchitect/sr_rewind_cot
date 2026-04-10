@@ -195,7 +195,3 @@ In short: this repo aims to become a practical lab for studying reverse chain-of
 - Accuracy is not the only success condition.
 - Some of the most interesting runs are the ones where rewind collapses.
 - Comparative, causal, logical, and algorithmic tasks usually produce more informative rewind behavior than one-line factual prompts.
-
-## License
-
-Add your preferred license here before wider public release.

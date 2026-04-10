@@ -1,0 +1,9 @@
+Problem:
+{{QUESTION}}
+
+Partial rewind trace ({{ORDER_DESC}}):
+{{BLOCK}}
+
+Use this tail-side partial trace if helpful, infer any missing context, and give ONLY the final answer.
+No explanation.
+No extra text.

@@ -1,0 +1,3 @@
+- Treat this as a story_reasoning task.
+- Keep causal order, character intent, and textual clues consistent.
+- Avoid outside assumptions unless the prompt itself introduces them.

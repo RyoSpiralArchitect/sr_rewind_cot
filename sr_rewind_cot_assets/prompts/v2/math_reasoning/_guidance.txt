@@ -1,0 +1,3 @@
+- Treat this as a math_reasoning task.
+- Prefer symbolic relations, invariants, exact expressions, and algebraic structure.
+- Avoid trial-and-error enumeration unless the question explicitly asks for it.

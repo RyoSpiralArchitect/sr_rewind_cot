@@ -1,0 +1,23 @@
+Problem:
+{{QUESTION}}
+
+Known early forward prefix (earlier to later):
+{{PREFIX_BLOCK}}
+
+Known late rewind-side tail ({{ORDER_DESC}}):
+{{TAIL_BLOCK}}
+
+Task:
+Reconstruct ONLY the missing middle reasoning that could bridge the early prefix to the late tail.
+{{TAIL_HINT}}
+
+Output STRICT JSON only:
+{"middle_steps":["..."]}
+
+Rules:
+- Output ONLY the missing middle steps, in forward order (earlier to later).
+- Do NOT repeat the given prefix steps.
+- Do NOT repeat the given tail steps.
+- Each step must be one short line.
+- If no middle is needed, output {"middle_steps":[]}.
+{{APPROX_RULE}}

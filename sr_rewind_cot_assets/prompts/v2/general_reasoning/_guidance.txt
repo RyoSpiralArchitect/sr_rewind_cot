@@ -1,0 +1,3 @@
+- Treat this as a general_reasoning task.
+- Prefer short, globally coherent reasoning over narrow heuristics.
+- Keep the answer aligned with the exact user request.

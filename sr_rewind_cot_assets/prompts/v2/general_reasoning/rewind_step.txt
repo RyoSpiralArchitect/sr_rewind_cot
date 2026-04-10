@@ -1,0 +1,23 @@
+Problem:
+{{QUESTION}}
+
+Known final answer:
+{{ANSWER}}
+
+Already recovered later reasoning steps, ordered from latest step back toward earlier ones:
+{{LATER_BLOCK}}
+
+Recover EXACTLY ONE short reasoning step that should come immediately before the known later steps.
+
+Task family guidance:
+{{FAMILY_GUIDANCE}}
+
+Rules:
+- Output STRICT JSON only: {"step":"...","novelty":"...","why_earlier":"..."}
+- The step must be one short atomic line.
+- The "novelty" field must name the new concept or prerequisite that this step adds.
+- The "why_earlier" field must briefly explain why the step belongs earlier than the later recovered steps.
+- Do not output the final answer.
+- Do not jump to steps earlier than the step you are recovering.
+- Keep it semantically consistent with the problem.
+{{NOVELTY_BLOCK}}

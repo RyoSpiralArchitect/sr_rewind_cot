@@ -1,0 +1,12 @@
+Problem:
+{{QUESTION}}
+
+Partial trace (first {{K}} steps):
+{{STEPS_BLOCK}}
+
+Task family guidance:
+{{FAMILY_GUIDANCE}}
+
+Continue the reasoning from here and give ONLY the final answer.
+No explanation.
+No extra text.

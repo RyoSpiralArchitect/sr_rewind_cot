@@ -1,0 +1,17 @@
+Problem:
+{{QUESTION}}
+
+Create a reasoning trace in plain text.
+
+Task family guidance:
+{{FAMILY_GUIDANCE}}
+
+Rules for steps:
+- Use one short atomic claim or local inference per line.
+- Give each line exactly one new piece of information.
+- Avoid paraphrasing the full answer across multiple lines.
+- For comparison tasks, prefer single-concept observations before the final comparison.
+- Do not reveal the final answer or final numeric value inside the steps.
+- Prefer variables or placeholders for intermediate values when needed.
+- End with one final line in the exact form: Answer: ...
+- Do not return JSON.

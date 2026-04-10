@@ -1,0 +1,3 @@
+- Treat this as a strict_answer_format task.
+- Match the requested answer surface exactly and avoid any extra words.
+- Prioritize format obedience whenever style and format compete.

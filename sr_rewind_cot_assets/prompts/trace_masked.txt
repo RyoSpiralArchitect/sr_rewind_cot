@@ -1,0 +1,15 @@
+Problem:
+{{QUESTION}}
+
+Create a reasoning trace as STRICT JSON:
+{
+  "steps": ["..."],
+  "answer": "..."
+}
+
+Rules for steps:
+- Use one short line per step.
+- Do not reveal the final answer or final numeric value inside steps.
+- Prefer variables or placeholders for intermediate values when needed.
+- Put the final answer only in the "answer" field.
+- Return JSON only.

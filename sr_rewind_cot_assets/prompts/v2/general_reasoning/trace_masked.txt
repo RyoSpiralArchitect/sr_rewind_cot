@@ -1,0 +1,24 @@
+Problem:
+{{QUESTION}}
+
+Create a reasoning trace as STRICT JSON:
+{
+  "steps": [
+    {"id": 1, "type": "facet", "text": "..."}
+  ],
+  "answer": "..."
+}
+
+Task family guidance:
+{{FAMILY_GUIDANCE}}
+
+Rules for steps:
+- Use one short atomic claim or local inference per step.
+- Give each step exactly one new piece of information.
+- Prefer types such as premise, facet, inference, constraint, or comparison.
+- Do not reveal the final answer or final numeric value inside steps.
+- Prefer variables or placeholders for intermediate values when needed.
+- Do not paraphrase the final answer inside the earlier steps.
+- Avoid summary restatements; each later step should depend on earlier steps.
+- Put the final answer only in the "answer" field.
+- Return JSON only.

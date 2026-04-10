@@ -1,0 +1,21 @@
+Problem:
+{{QUESTION}}
+
+Known final answer:
+{{ANSWER}}
+
+Already recovered later reasoning steps, ordered from latest step back toward earlier ones:
+{{LATER_BLOCK}}
+
+Recover EXACTLY ONE short reasoning step that should come immediately before the known later steps.
+
+Task family guidance:
+{{FAMILY_GUIDANCE}}
+
+Rules:
+- Output exactly one short atomic line.
+- Do not output JSON.
+- Do not output the final answer.
+- Do not jump to steps earlier than the step you are recovering.
+- Keep it semantically consistent with the problem.
+{{NOVELTY_BLOCK}}

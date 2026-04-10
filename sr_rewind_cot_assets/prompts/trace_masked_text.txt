@@ -1,0 +1,11 @@
+Problem:
+{{QUESTION}}
+
+Create a reasoning trace in plain text.
+
+Rules for steps:
+- Use one short step per line.
+- Do not reveal the final answer or final numeric value inside the steps.
+- Prefer variables or placeholders for intermediate values when needed.
+- End with one final line in the exact form: Answer: ...
+- Do not return JSON.

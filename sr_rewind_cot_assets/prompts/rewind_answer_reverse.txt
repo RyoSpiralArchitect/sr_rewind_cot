@@ -1,0 +1,9 @@
+Problem:
+{{QUESTION}}
+
+Partial rewind trace ({{ORDER_DESC}}):
+{{BLOCK}}
+
+First mentally unroll this rewind-side trace into the forward direction, infer any missing earlier context if helpful, then give ONLY the final answer.
+No explanation.
+No extra text.

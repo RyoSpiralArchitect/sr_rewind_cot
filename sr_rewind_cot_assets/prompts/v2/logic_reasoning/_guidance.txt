@@ -1,0 +1,3 @@
+- Treat this as a logic_reasoning task.
+- Track premises, constraints, and exclusions explicitly.
+- Do not invent facts beyond what the prompt licenses.

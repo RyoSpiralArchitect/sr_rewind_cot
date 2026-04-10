@@ -1,0 +1,18 @@
+Problem:
+{{QUESTION}}
+
+Known early forward prefix (earlier to later):
+{{PREFIX_BLOCK}}
+
+Known late rewind-side tail ({{ORDER_DESC}}):
+{{TAIL_BLOCK}}
+
+Task:
+Infer a coherent missing middle segment that could connect the early prefix to the late tail.
+{{TAIL_HINT}}
+You may do the middle completion mentally, then give ONLY the final answer.
+
+Rules:
+- Use both ends if they are informative.
+- If one end is weak or noisy, still prefer a globally coherent completion.
+- No explanation, no extra text.

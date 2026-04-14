@@ -38,6 +38,7 @@ This makes it useful for experiments about:
 - Generate multiple forward trace candidates and rerank them with a pseudo Process Reward Model (`PRM-lite`) before running downstream rewind analysis.
 - Optionally rerank multiple rewind-step candidates with the same pseudo Process Reward Model idea, so forward and reverse reasoning can be compared under matched heuristics.
 - Stream the forward trace first, then stream rewind recovery.
+- Reuse exact-prompt MLX prefills on rewind-tail and oracle-tail sweeps, where repeated answer sampling hits the same prompt many times.
 - Save raw generations and prompt/output logs as JSONL for inspection.
 - Save atomic `step_records` so steps can be analyzed as structured claims instead of only flat strings.
 - Compute forward stability curves, entropy, divergence, rewind novelty, fixed-point depth, and core-strength style metrics.
@@ -61,6 +62,7 @@ In many runs, "failure" is still informative. A rewind operator that falls into 
 
 - [sr_rewind_cot.py](./sr_rewind_cot.py): main CLI and research harness
 - [sr_rewind_cot_assets/prompts](./sr_rewind_cot_assets/prompts): external prompt templates and task-family guidance
+- [sr_rewind_cot_assets/question_sets](./sr_rewind_cot_assets/question_sets): ready-to-run observation batches and reusable question packs
 - [tests/test_sr_rewind_cot.py](./tests/test_sr_rewind_cot.py): targeted regression tests for parsing, rewind behavior, streaming, and metrics
 
 ## Installation
@@ -138,6 +140,12 @@ python3 sr_rewind_cot.py run --config experiment.yaml
 
 ```bash
 python3 sr_rewind_cot.py plot --run-dir results/run_YYYYMMDD_HHMMSS
+```
+
+### 5. Run the built-in general reasoning observation set
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v1.yaml
 ```
 
 ## Outputs

@@ -101,6 +101,17 @@ class TestNamingAndPromptAssets(unittest.TestCase):
         self.assertIn('Put the final answer only in the "answer" field.', prompt)
         self.assertTrue((Path(spbc.PROMPTS_DIR) / "trace_masked.txt").exists())
 
+    def test_general_reasoning_question_set_exists(self) -> None:
+        if spbc.yaml is None:
+            self.skipTest("pyyaml not available")
+        path = Path(spbc.SCRIPT_DIR) / "sr_rewind_cot_assets" / "question_sets" / "general_reasoning_observation_v1.yaml"
+        self.assertTrue(path.exists())
+        cfg = spbc.load_config(str(path))
+        questions = cfg.get("questions") or []
+        self.assertEqual(len(questions), 6)
+        self.assertEqual(questions[0]["id"], "q1")
+        self.assertIn("binary search", questions[0]["question"].lower())
+
     def test_v2_prompt_family_guidance_is_injected(self) -> None:
         prompt = spbc.build_trace_prompt(
             "Find the general term.",
@@ -640,6 +651,59 @@ class TestHFBackendSelection(unittest.TestCase):
         chunk = types.SimpleNamespace(text="", token=123)
         self.assertEqual(backend._extract_mlx_chunk_text(chunk), "")
 
+    def test_generate_many_mlx_reuses_prefilled_prompt_cache(self) -> None:
+        backend = spbc.HFLocalBackend(name="x", model_path="./model", device="mps", hf_backend="mlx")
+        backend._model = object()
+        backend._tokenizer = object()
+        backend._loaded = True
+        backend._runtime_backend = "mlx"
+
+        captured_prompts = []
+        captured_caches = []
+        seed_values = []
+        base_cache = [types.SimpleNamespace(tag="base")]
+
+        fake_mlx_core = types.SimpleNamespace(
+            random=types.SimpleNamespace(seed=lambda x: seed_values.append(x)),
+            clear_cache=lambda: None,
+        )
+
+        def _make_sampler(**kwargs):
+            return ("sampler", kwargs)
+
+        def _make_logits_processors(**kwargs):
+            return [("lp", kwargs)]
+
+        def _stream_generate(model, tokenizer, **kwargs):
+            captured_prompts.append(kwargs["prompt"])
+            captured_caches.append(kwargs.get("prompt_cache"))
+            yield types.SimpleNamespace(text="part-a")
+            yield types.SimpleNamespace(text="part-b")
+
+        fake_sample_utils = types.SimpleNamespace(
+            make_sampler=_make_sampler,
+            make_logits_processors=_make_logits_processors,
+        )
+        fake_mlx_lm = types.SimpleNamespace(stream_generate=_stream_generate)
+
+        with mock.patch.object(backend, "_format_prompt", return_value=("PROMPT", True)), \
+             mock.patch.object(backend, "_tokenize_mlx_prompt", return_value=[11, 22, 33]), \
+             mock.patch.object(backend, "_prepare_mlx_prompt_reuse", return_value=([33], base_cache)), \
+             mock.patch.dict(sys.modules, {
+                 "mlx.core": fake_mlx_core,
+                 "mlx_lm.sample_utils": fake_sample_utils,
+                 "mlx_lm": fake_mlx_lm,
+             }):
+            out = backend._generate_many_mlx("hello", temperature=0.3, seeds=[17, 18])
+
+        self.assertEqual(out, ["part-apart-b", "part-apart-b"])
+        self.assertEqual(captured_prompts, [[33], [33]])
+        self.assertEqual(seed_values, [17, 18])
+        self.assertEqual(len(captured_caches), 2)
+        self.assertIsNot(captured_caches[0], base_cache)
+        self.assertIsNot(captured_caches[1], base_cache)
+        self.assertIsNot(captured_caches[0], captured_caches[1])
+
 
 class _StubBackend:
     def __init__(self) -> None:
@@ -700,6 +764,157 @@ class TestRawGenerationCapture(unittest.TestCase):
 
         self.assertIn("raw_answers_by_depth", rewind["oracle_tail_curve"])
         self.assertEqual(len(rewind["oracle_tail_curve"]["raw_answers_by_depth"]), 3)
+
+
+class TestBatchGenerationReuse(unittest.TestCase):
+    def test_logged_backend_generate_many_logs_each_output(self) -> None:
+        class _BatchEchoBackend:
+            name = "batch_echo"
+
+            def generate_many(self, prompt: str, temperature: float, seeds):
+                return [f"out-{seed}" for seed in seeds]
+
+        logger = spbc.GenerationLogger(
+            backend_name="batch_echo",
+            question_id="q1",
+            question="Find X.",
+            prompt_version="v2",
+            prompt_family="general_reasoning",
+        )
+        backend = spbc.LoggedBackend(_BatchEchoBackend(), logger)
+        outs = backend.generate_many("Create a reasoning trace as STRICT JSON:", temperature=0.2, seeds=[5, 6])
+        self.assertEqual(outs, ["out-5", "out-6"])
+        self.assertEqual(len(logger.rows), 2)
+        self.assertEqual(logger.rows[0]["seed"], 5)
+        self.assertEqual(logger.rows[1]["seed"], 6)
+        self.assertEqual(logger.rows[0]["stage"], "trace")
+
+    def test_build_trace_bundle_keeps_trace_candidates_sequential(self) -> None:
+        class _TraceBatchBackend:
+            def __init__(self) -> None:
+                self.name = "trace-batch"
+                self.single_calls = 0
+                self.many_calls = []
+
+            def generate(self, prompt: str, temperature: float, seed=None) -> str:
+                self.single_calls += 1
+                return json.dumps({"steps": ["base trace"], "answer": "base answer"})
+
+            def generate_many(self, prompt: str, temperature: float, seeds):
+                self.many_calls.append({"prompt": prompt, "temperature": temperature, "seeds": list(seeds)})
+                return [
+                    json.dumps({"steps": [f"candidate trace {i + 1}"], "answer": f"answer {i + 1}"})
+                    for i, _ in enumerate(seeds)
+                ]
+
+        backend = _TraceBatchBackend()
+        settings = spbc.ExperimentSettings(
+            process_reward_mode="lite",
+            trace_candidates=4,
+            trace_candidate_temperature=0.6,
+            prompt_version="v2",
+            prompt_family="general_reasoning",
+        )
+        bundle = spbc.build_trace_bundle(
+            backend,
+            "Why does binary search require a sorted array?",
+            settings,
+            seed=123,
+        )
+        self.assertEqual(backend.single_calls, 4)
+        self.assertEqual(len(backend.many_calls), 0)
+        self.assertEqual(len((bundle.get("process_reward") or {}).get("candidates") or []), 4)
+
+    def test_compute_curve_keeps_forward_answers_sequential(self) -> None:
+        class _AnswerBatchBackend:
+            def __init__(self) -> None:
+                self.name = "answer-batch"
+                self.single_calls = []
+                self.many_calls = []
+
+            def generate(self, prompt: str, temperature: float, seed=None) -> str:
+                self.single_calls.append({"prompt": prompt, "temperature": temperature, "seed": seed})
+                return "stable answer"
+
+            def generate_many(self, prompt: str, temperature: float, seeds):
+                self.many_calls.append({"prompt": prompt, "temperature": temperature, "seeds": list(seeds)})
+                return ["stable answer" for _ in seeds]
+
+        backend = _AnswerBatchBackend()
+        settings = spbc.ExperimentSettings(
+            n_samples_baseline=2,
+            n_samples_per_k=2,
+        )
+        trace = spbc.Trace(steps=["step 1", "step 2"], answer="stable answer")
+        result = spbc.compute_curve(
+            backend,
+            "Why does binary search require a sorted array?",
+            trace,
+            settings,
+            run_seed=123,
+        )
+        self.assertEqual(len(backend.many_calls), 0)
+        self.assertEqual(len(backend.single_calls), 8)
+        self.assertEqual(result["A_star"], "stable answer")
+
+    def test_only_tail_curve_uses_batch_exact_prompt_samples(self) -> None:
+        class _RewindBatchBackend:
+            def __init__(self) -> None:
+                self.name = "rewind-batch"
+                self.single_calls = []
+                self.many_calls = []
+
+            def generate(self, prompt: str, temperature: float, seed=None) -> str:
+                self.single_calls.append({"prompt": prompt, "temperature": temperature, "seed": seed})
+                if "Recover EXACTLY ONE short reasoning step" in prompt:
+                    return json.dumps({"step": "rewind candidate"})
+                return "stable answer"
+
+            def generate_many(self, prompt: str, temperature: float, seeds):
+                self.many_calls.append({"prompt": prompt, "temperature": temperature, "seeds": list(seeds)})
+                return ["stable answer" for _ in seeds]
+
+        backend = _RewindBatchBackend()
+        trace = spbc.Trace(
+            steps=["step 1", "step 2"],
+            answer="stable answer",
+        )
+        settings = spbc.ExperimentSettings(
+            rewind_process_reward_mode="lite",
+            rewind_step_candidates=3,
+            rewind_novelty_retries=0,
+            rewind_samples_per_depth=2,
+        )
+        rewind_trace = spbc.recover_rewind_trace(
+            backend,
+            "Why does binary search require a sorted array?",
+            trace,
+            settings,
+            run_seed=123,
+        )
+        rewind_calls = [
+            call for call in backend.single_calls
+            if "Recover EXACTLY ONE short reasoning step" in call["prompt"]
+        ]
+        self.assertEqual(len(rewind_calls), 6)
+        self.assertEqual(len(backend.many_calls), 0)
+        curve = spbc.compute_tail_curve(
+            backend,
+            "Why does binary search require a sorted array?",
+            rewind_trace["latest_to_earlier"],
+            settings,
+            run_seed=456,
+            baseline_A_star="stable answer",
+            baseline_distribution={"stable answer": 2},
+            label="recovered",
+        )
+        tail_calls = [
+            call for call in backend.many_calls
+            if "Partial rewind trace" in call["prompt"]
+        ]
+        self.assertEqual(len(tail_calls), 3)
+        self.assertTrue(all(len(call["seeds"]) == 2 for call in tail_calls))
+        self.assertEqual(curve["answer_calls"], 6)
 
 
 class TestRewindProcessRewardLite(unittest.TestCase):

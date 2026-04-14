@@ -598,6 +598,42 @@ class TestHFBackendSelection(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "mlx unavailable"):
                 backend._load()
 
+    def test_generate_torch_imports_torch_locally(self) -> None:
+        backend = spbc.HFLocalBackend(name="x", model_path="./model", device="mps", hf_backend="torch")
+        backend._model = mock.Mock()
+        backend._tokenizer = mock.Mock()
+        backend._loaded = True
+        backend._runtime_backend = "torch"
+
+        class _FakeTensor:
+            def __init__(self, values):
+                self.values = list(values)
+                self.shape = (1, len(self.values))
+
+            def to(self, device):
+                return self
+
+        class _NoGrad:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        backend._tokenizer.return_value = {"input_ids": _FakeTensor([1, 2, 3])}
+        backend._tokenizer.decode.return_value = "decoded"
+        backend._model.generate.return_value = [[1, 2, 3, 4, 5]]
+        fake_torch = types.SimpleNamespace(no_grad=lambda: _NoGrad())
+
+        with mock.patch.object(backend, "_seed_torch") as seed_torch, \
+             mock.patch.object(backend, "_format_prompt", return_value=("PROMPT", True)), \
+             mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            out = backend._generate_torch("hello", temperature=0.0, seed=17)
+
+        self.assertEqual(out, "decoded")
+        seed_torch.assert_called_once_with(17)
+        backend._model.generate.assert_called_once()
+
     def test_stream_generate_mlx_uses_sampler_not_temp_kwargs(self) -> None:
         backend = spbc.HFLocalBackend(name="x", model_path="./model", device="mps", hf_backend="mlx")
         backend._model = object()

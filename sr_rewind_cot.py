@@ -2140,6 +2140,10 @@ class HFLocalBackend:
 
     def _generate_torch(self, prompt: str, temperature: float, seed: Optional[int] = None) -> str:
         self._seed_torch(seed)
+        try:
+            import torch  # type: ignore
+        except Exception as e:
+            raise RuntimeError("torch is required for hf_local backend") from e
         text, _ = self._format_prompt(prompt)
         tok = self._tokenizer
         model = self._model

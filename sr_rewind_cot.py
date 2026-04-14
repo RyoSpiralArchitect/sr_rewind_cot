@@ -42,9 +42,11 @@ Dependencies
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import dataclasses
 from dataclasses import dataclass
+import importlib
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Protocol, Union
 import json
 import os
@@ -136,6 +138,12 @@ def write_jsonl(path: str, rows: List[Dict[str, Any]]) -> None:
     with open(path, "w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+def import_optional_module(module_name: str) -> Any:
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    return importlib.import_module(module_name)
 
 def read_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
@@ -813,6 +821,29 @@ class LoggedBackend:
         )
         return out
 
+    def generate_many(self, prompt: str, temperature: float, seeds: List[Optional[int]]) -> List[str]:
+        stage = infer_generation_stage(prompt)
+        batch_fn = getattr(self.inner, "generate_many", None)
+        if callable(batch_fn):
+            try:
+                outs = list(batch_fn(prompt, temperature=temperature, seeds=seeds))
+            except Exception:
+                outs = []
+            else:
+                if len(outs) != len(seeds):
+                    outs = []
+            if outs:
+                for seed, out in zip(seeds, outs):
+                    self.logger.log(
+                        stage=stage,
+                        prompt=prompt,
+                        temperature=temperature,
+                        seed=seed,
+                        output=out,
+                    )
+                return outs
+        return [self.generate(prompt, temperature=temperature, seed=seed) for seed in seeds]
+
     def stream_generate(self, prompt: str, temperature: float, seed: Optional[int] = None) -> Iterator[str]:
         stage = infer_generation_stage(prompt)
         stream_fn = getattr(self.inner, "stream_generate", None)
@@ -876,6 +907,26 @@ def emit_streamed_generation(
     if enable_stream:
         print(out, flush=True)
     return out
+
+def generate_many_outputs(
+    backend: Backend,
+    prompt: str,
+    temperature: float,
+    seeds: List[Optional[int]],
+) -> List[str]:
+    items = list(seeds)
+    if not items:
+        return []
+    batch_fn = getattr(backend, "generate_many", None)
+    if callable(batch_fn):
+        try:
+            outs = list(batch_fn(prompt, temperature=temperature, seeds=items))
+        except Exception:
+            outs = []
+        else:
+            if len(outs) == len(items):
+                return [str(out).strip() for out in outs]
+    return [backend.generate(prompt, temperature=temperature, seed=seed).strip() for seed in items]
 
 @contextlib.contextmanager
 def temporary_backend_generation_overrides(backend: Backend, **overrides: Any) -> Iterator[None]:
@@ -1520,6 +1571,7 @@ def rewind_axes_jsonl_rows(comp: Dict[str, Any]) -> List[Dict[str, Any]]:
 class Backend(Protocol):
     name: str
     def generate(self, prompt: str, temperature: float, seed: Optional[int] = None) -> str: ...
+    def generate_many(self, prompt: str, temperature: float, seeds: List[Optional[int]]) -> List[str]: ...
 
 
 @dataclass
@@ -1587,6 +1639,9 @@ class HTTPBackend:
 
         out = resp.json()
         return out["choices"][0]["message"]["content"]
+
+    def generate_many(self, prompt: str, temperature: float, seeds: List[Optional[int]]) -> List[str]:
+        return [self.generate(prompt, temperature=temperature, seed=seed) for seed in seeds]
 
 
 # ----------------------------- HF local backend -----------------------------
@@ -2008,7 +2063,7 @@ class HFLocalBackend:
 
     def _load_mlx(self) -> None:
         try:
-            import mlx_lm  # type: ignore
+            mlx_lm = import_optional_module("mlx_lm")  # type: ignore
         except Exception as e:
             raise RuntimeError("MLX backend requires mlx_lm. Install with: pip install mlx-lm") from e
 
@@ -2190,7 +2245,7 @@ class HFLocalBackend:
 
     def _generate_mlx(self, prompt: str, temperature: float, seed: Optional[int] = None) -> str:
         try:
-            import mlx_lm  # type: ignore
+            mlx_lm = import_optional_module("mlx_lm")  # type: ignore
         except Exception as e:
             raise RuntimeError("MLX backend requires mlx_lm") from e
 
@@ -2224,11 +2279,101 @@ class HFLocalBackend:
                 )
             ).strip()
 
+    def _tokenize_mlx_prompt(self, text: str) -> List[int]:
+        tok = self._tokenizer
+        bos_token = getattr(tok, "bos_token", None)
+        add_special_tokens = bos_token is None or not str(text).startswith(str(bos_token))
+        try:
+            tokens = tok.encode(text, add_special_tokens=add_special_tokens)
+        except TypeError:
+            tokens = tok.encode(text)
+        if hasattr(tokens, "tolist"):
+            tokens = tokens.tolist()
+        if isinstance(tokens, tuple):
+            tokens = list(tokens)
+        return [int(token) for token in (tokens or [])]
+
+    def _prepare_mlx_prompt_reuse(
+        self,
+        prompt_tokens: List[int],
+        *,
+        prefill_step_size: int = 2048,
+    ) -> Tuple[List[int], Optional[Any]]:
+        if not prompt_tokens:
+            raise RuntimeError("MLX prompt tokenization returned no tokens.")
+        if len(prompt_tokens) == 1:
+            return list(prompt_tokens), None
+        try:
+            mx = import_optional_module("mlx.core")  # type: ignore
+            make_prompt_cache = import_optional_module("mlx_lm.models.cache").make_prompt_cache  # type: ignore[attr-defined]
+        except Exception as e:
+            raise RuntimeError("MLX backend requires mlx_lm prompt cache support") from e
+
+        prefix_tokens = list(prompt_tokens[:-1])
+        suffix_tokens = [int(prompt_tokens[-1])]
+        prompt_cache = make_prompt_cache(self._model)
+        prefix = mx.array(prefix_tokens)[None]
+        for i in range(0, prefix.shape[1], max(1, int(prefill_step_size))):
+            self._model(prefix[:, i : i + int(prefill_step_size)], cache=prompt_cache)
+            mx.eval([c.state for c in prompt_cache])
+            mx.clear_cache()
+        return suffix_tokens, prompt_cache
+
+    def _generate_many_mlx(
+        self,
+        prompt: str,
+        temperature: float,
+        seeds: List[Optional[int]],
+    ) -> List[str]:
+        try:
+            mlx_lm = import_optional_module("mlx_lm")  # type: ignore
+            mx = import_optional_module("mlx.core")  # type: ignore
+            sample_utils = import_optional_module("mlx_lm.sample_utils")  # type: ignore
+            make_logits_processors = sample_utils.make_logits_processors  # type: ignore[attr-defined]
+            make_sampler = sample_utils.make_sampler  # type: ignore[attr-defined]
+        except Exception as e:
+            raise RuntimeError("MLX backend requires mlx_lm") from e
+
+        text, _ = self._format_prompt(prompt)
+        prompt_tokens = self._tokenize_mlx_prompt(text)
+        prompt_suffix, prompt_cache = self._prepare_mlx_prompt_reuse(prompt_tokens)
+        outputs: List[str] = []
+        for seed in seeds:
+            if seed is not None:
+                try:
+                    mx.random.seed(int(seed))
+                except Exception:
+                    pass
+            kwargs: Dict[str, Any] = {
+                "prompt": prompt_suffix,
+                "max_tokens": int(self.max_new_tokens),
+                "sampler": make_sampler(
+                    temp=float(temperature),
+                    top_p=float(self.top_p),
+                    top_k=int(self.top_k),
+                ),
+                "logits_processors": make_logits_processors(
+                    repetition_penalty=(float(self.repetition_penalty) if float(self.repetition_penalty) != 1.0 else None),
+                ),
+            }
+            if prompt_cache is not None:
+                kwargs["prompt_cache"] = copy.deepcopy(prompt_cache)
+            parts: List[str] = []
+            for chunk in mlx_lm.stream_generate(self._model, self._tokenizer, **kwargs):
+                text_chunk = self._extract_mlx_chunk_text(chunk)
+                if text_chunk:
+                    parts.append(text_chunk)
+            outputs.append("".join(parts).strip())
+            mx.clear_cache()
+        return outputs
+
     def _stream_generate_mlx(self, prompt: str, temperature: float, seed: Optional[int] = None) -> Iterator[str]:
         try:
-            import mlx_lm  # type: ignore
-            import mlx.core as mx  # type: ignore
-            from mlx_lm.sample_utils import make_logits_processors, make_sampler  # type: ignore
+            mlx_lm = import_optional_module("mlx_lm")  # type: ignore
+            mx = import_optional_module("mlx.core")  # type: ignore
+            sample_utils = import_optional_module("mlx_lm.sample_utils")  # type: ignore
+            make_logits_processors = sample_utils.make_logits_processors  # type: ignore[attr-defined]
+            make_sampler = sample_utils.make_sampler  # type: ignore[attr-defined]
         except Exception as e:
             raise RuntimeError("MLX backend requires mlx_lm") from e
 
@@ -2261,6 +2406,14 @@ class HFLocalBackend:
         if self._runtime_backend == "mlx":
             return self._generate_mlx(prompt, temperature=temperature, seed=seed)
         return self._generate_torch(prompt, temperature=temperature, seed=seed)
+
+    def generate_many(self, prompt: str, temperature: float, seeds: List[Optional[int]]) -> List[str]:
+        self._ensure_loaded()
+        if not seeds:
+            return []
+        if self._runtime_backend == "mlx":
+            return self._generate_many_mlx(prompt, temperature=temperature, seeds=seeds)
+        return [self._generate_torch(prompt, temperature=temperature, seed=seed) for seed in seeds]
 
     def stream_generate(self, prompt: str, temperature: float, seed: Optional[int] = None) -> Iterator[str]:
         self._ensure_loaded()
@@ -2566,6 +2719,24 @@ def build_trace_bundle(
         "process_reward": process_reward,
     }
 
+def build_reanswer_from_prefix_prompt(
+    question: str,
+    steps: List[str],
+    k: int,
+    prompt_version: str = "v1",
+    prompt_family: Optional[str] = None,
+) -> str:
+    prefix = steps[:k]
+    steps_block = "\n".join(f"- {s}" for s in prefix) if prefix else "(no steps)"
+    return render_prompt_template(
+        "reanswer_from_prefix.txt",
+        prompt_version=prompt_version,
+        prompt_family=prompt_family,
+        QUESTION=question,
+        K=k,
+        STEPS_BLOCK=steps_block,
+    )
+
 def reanswer_from_prefix(
     backend: Backend,
     question: str,
@@ -2576,17 +2747,33 @@ def reanswer_from_prefix(
     prompt_version: str = "v1",
     prompt_family: Optional[str] = None,
 ) -> str:
-    prefix = steps[:k]
-    steps_block = "\n".join(f"- {s}" for s in prefix) if prefix else "(no steps)"
-    prompt = render_prompt_template(
-        "reanswer_from_prefix.txt",
+    prompt = build_reanswer_from_prefix_prompt(
+        question,
+        steps,
+        k,
         prompt_version=prompt_version,
         prompt_family=prompt_family,
-        QUESTION=question,
-        K=k,
-        STEPS_BLOCK=steps_block,
     )
     return backend.generate(prompt, temperature=temperature, seed=seed).strip()
+
+def reanswer_many_from_prefix(
+    backend: Backend,
+    question: str,
+    steps: List[str],
+    k: int,
+    temperature: float,
+    seeds: List[Optional[int]],
+    prompt_version: str = "v1",
+    prompt_family: Optional[str] = None,
+) -> List[str]:
+    prompt = build_reanswer_from_prefix_prompt(
+        question,
+        steps,
+        k,
+        prompt_version=prompt_version,
+        prompt_family=prompt_family,
+    )
+    return generate_many_outputs(backend, prompt, temperature=temperature, seeds=seeds)
 
 
 def build_rewind_step_prompt(
@@ -2894,6 +3081,27 @@ def reanswer_from_rewind_tail(
     )
     return backend.generate(prompt, temperature=temperature, seed=seed).strip()
 
+def reanswer_many_from_rewind_tail(
+    backend: Backend,
+    question: str,
+    latest_to_earlier_steps: List[str],
+    depth: int,
+    temperature: float,
+    seeds: List[Optional[int]],
+    order: str = "reverse",
+    prompt_version: str = "v1",
+    prompt_family: Optional[str] = None,
+) -> List[str]:
+    prompt = build_rewind_answer_prompt(
+        question,
+        latest_to_earlier_steps,
+        depth,
+        order=order,
+        prompt_version=prompt_version,
+        prompt_family=prompt_family,
+    )
+    return generate_many_outputs(backend, prompt, temperature=temperature, seeds=seeds)
+
 def compute_tail_curve(
     backend: Backend,
     question: str,
@@ -2914,21 +3122,17 @@ def compute_tail_curve(
     base_support = list(base_counter.keys())
 
     for depth in range(0, D + 1):
-        answers_depth: List[str] = []
-        for j in range(n_samples):
-            answers_depth.append(
-                reanswer_from_rewind_tail(
-                    backend,
-                    question,
-                    latest_to_earlier_steps,
-                    depth,
-                    temperature=settings.temperature_reanswer,
-                    seed=run_seed + 900_000 + depth * 1000 + j,
-                    order=settings.rewind_order,
-                    prompt_version=settings.prompt_version,
-                    prompt_family=settings.prompt_family,
-                )
-            )
+        answers_depth = reanswer_many_from_rewind_tail(
+            backend,
+            question,
+            latest_to_earlier_steps,
+            depth,
+            temperature=settings.temperature_reanswer,
+            seeds=[run_seed + 900_000 + depth * 1000 + j for j in range(n_samples)],
+            order=settings.rewind_order,
+            prompt_version=settings.prompt_version,
+            prompt_family=settings.prompt_family,
+        )
         if save_raw:
             raw_answers_by_depth.append({"depth": depth, "answers": answers_depth[:]})
         dist_d = dist_from_answers(answers_depth)

@@ -63,6 +63,7 @@ import threading
 from difflib import SequenceMatcher
 from collections import Counter
 from datetime import datetime
+import sr_rewind_cot_metrics as metrics
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(SCRIPT_DIR, "sr_rewind_cot_assets", "prompts")
@@ -1666,9 +1667,97 @@ class HFLocalBackend:
     _tokenizer: Any = None
     _model: Any = None
     _runtime_backend: str = "unloaded"
+    _runtime_metrics: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def _normalize_model_hint(self, s: Optional[str]) -> str:
         return "".join(ch.lower() for ch in str(s or "") if ch.isalnum())
+
+    def reset_runtime_metrics(self) -> None:
+        self._runtime_metrics = {
+            "mlx_prompt_reuse": {
+                "batch_calls_total": 0,
+                "batch_samples_total": 0,
+                "cache_reuse_calls": 0,
+                "cache_reuse_samples": 0,
+                "prompt_tokens_total": 0,
+                "prefix_tokens_total": 0,
+                "suffix_tokens_total": 0,
+                "naive_prefill_tokens_est": 0,
+                "actual_prefill_tokens_est": 0,
+                "saved_prefill_tokens_est": 0,
+                "cache_prepare_s_total": 0.0,
+                "batch_total_s": 0.0,
+                "cache_deepcopy_calls": 0,
+                "cache_deepcopy_s_total": 0.0,
+                "output_chars_total": 0,
+                "output_tokens_est_total": 0,
+                "stages": {},
+            }
+        }
+
+    def snapshot_runtime_metrics(self) -> Dict[str, Any]:
+        if not isinstance(self._runtime_metrics, dict) or not self._runtime_metrics:
+            self.reset_runtime_metrics()
+        return copy.deepcopy(self._runtime_metrics)
+
+    def _record_mlx_prompt_reuse(
+        self,
+        *,
+        stage: str,
+        prompt_tokens_len: int,
+        prefix_tokens_len: int,
+        suffix_tokens_len: int,
+        sample_count: int,
+        cache_prepare_s: float,
+        batch_total_s: float,
+        cache_reused: bool,
+        cache_deepcopy_s_total: float,
+        output_chars_total: int,
+        output_tokens_est_total: int,
+    ) -> None:
+        if not isinstance(self._runtime_metrics, dict) or not self._runtime_metrics:
+            self.reset_runtime_metrics()
+
+        root = self._runtime_metrics.setdefault("mlx_prompt_reuse", {})
+        stages = root.setdefault("stages", {})
+        stage_bucket = stages.setdefault(stage, {})
+
+        naive_prefill_tokens_est = max(0, int(prompt_tokens_len)) * max(0, int(sample_count))
+        actual_prefill_tokens_est = (
+            max(0, int(prefix_tokens_len)) + max(0, int(suffix_tokens_len)) * max(0, int(sample_count))
+            if cache_reused
+            else naive_prefill_tokens_est
+        )
+        saved_prefill_tokens_est = max(0, naive_prefill_tokens_est - actual_prefill_tokens_est)
+        cache_reuse_calls = 1 if cache_reused else 0
+        cache_reuse_samples = int(sample_count) if cache_reused else 0
+        cache_deepcopy_calls = int(sample_count) if cache_reused else 0
+
+        increments = {
+            "batch_calls_total": 1,
+            "batch_samples_total": int(sample_count),
+            "cache_reuse_calls": cache_reuse_calls,
+            "cache_reuse_samples": cache_reuse_samples,
+            "prompt_tokens_total": int(prompt_tokens_len),
+            "prefix_tokens_total": int(prefix_tokens_len),
+            "suffix_tokens_total": int(suffix_tokens_len),
+            "naive_prefill_tokens_est": naive_prefill_tokens_est,
+            "actual_prefill_tokens_est": actual_prefill_tokens_est,
+            "saved_prefill_tokens_est": saved_prefill_tokens_est,
+            "cache_prepare_s_total": float(cache_prepare_s),
+            "batch_total_s": float(batch_total_s),
+            "cache_deepcopy_calls": cache_deepcopy_calls,
+            "cache_deepcopy_s_total": float(cache_deepcopy_s_total),
+            "output_chars_total": int(output_chars_total),
+            "output_tokens_est_total": int(output_tokens_est_total),
+        }
+        for key, value in increments.items():
+            if isinstance(value, float):
+                root[key] = float(root.get(key, 0.0) or 0.0) + value
+                stage_bucket[key] = float(stage_bucket.get(key, 0.0) or 0.0) + value
+            else:
+                root[key] = int(root.get(key, 0) or 0) + int(value)
+                stage_bucket[key] = int(stage_bucket.get(key, 0) or 0) + int(value)
 
     def _read_model_dir_info(self, path: str) -> Optional[Dict[str, Any]]:
         cfg_path = os.path.join(path, "config.json")
@@ -2323,6 +2412,26 @@ class HFLocalBackend:
             mx.clear_cache()
         return suffix_tokens, prompt_cache
 
+    def _estimate_mlx_text_tokens(self, text: str) -> int:
+        s = str(text or "")
+        if not s:
+            return 0
+        tok = self._tokenizer
+        try:
+            tokens = tok.encode(s, add_special_tokens=False)
+        except TypeError:
+            tokens = tok.encode(s)
+        except Exception:
+            return 0
+        if hasattr(tokens, "tolist"):
+            tokens = tokens.tolist()
+        if isinstance(tokens, tuple):
+            tokens = list(tokens)
+        try:
+            return len(tokens or [])
+        except Exception:
+            return 0
+
     def _generate_many_mlx(
         self,
         prompt: str,
@@ -2340,7 +2449,14 @@ class HFLocalBackend:
 
         text, _ = self._format_prompt(prompt)
         prompt_tokens = self._tokenize_mlx_prompt(text)
+        stage = infer_generation_stage(prompt)
+        t_prepare = time.perf_counter()
         prompt_suffix, prompt_cache = self._prepare_mlx_prompt_reuse(prompt_tokens)
+        cache_prepare_s = time.perf_counter() - t_prepare
+        t_batch = time.perf_counter()
+        cache_deepcopy_s_total = 0.0
+        output_chars_total = 0
+        output_tokens_est_total = 0
         outputs: List[str] = []
         for seed in seeds:
             if seed is not None:
@@ -2361,14 +2477,33 @@ class HFLocalBackend:
                 ),
             }
             if prompt_cache is not None:
+                t_copy = time.perf_counter()
                 kwargs["prompt_cache"] = copy.deepcopy(prompt_cache)
+                cache_deepcopy_s_total += time.perf_counter() - t_copy
             parts: List[str] = []
             for chunk in mlx_lm.stream_generate(self._model, self._tokenizer, **kwargs):
                 text_chunk = self._extract_mlx_chunk_text(chunk)
                 if text_chunk:
                     parts.append(text_chunk)
-            outputs.append("".join(parts).strip())
+            out_text = "".join(parts).strip()
+            outputs.append(out_text)
+            output_chars_total += len(out_text)
+            output_tokens_est_total += self._estimate_mlx_text_tokens(out_text)
             mx.clear_cache()
+        batch_total_s = time.perf_counter() - t_batch
+        self._record_mlx_prompt_reuse(
+            stage=stage,
+            prompt_tokens_len=len(prompt_tokens),
+            prefix_tokens_len=max(0, len(prompt_tokens) - len(prompt_suffix)),
+            suffix_tokens_len=len(prompt_suffix),
+            sample_count=len(seeds),
+            cache_prepare_s=cache_prepare_s,
+            batch_total_s=batch_total_s,
+            cache_reused=prompt_cache is not None,
+            cache_deepcopy_s_total=cache_deepcopy_s_total,
+            output_chars_total=output_chars_total,
+            output_tokens_est_total=output_tokens_est_total,
+        )
         return outputs
 
     def _stream_generate_mlx(self, prompt: str, temperature: float, seed: Optional[int] = None) -> Iterator[str]:
@@ -2482,6 +2617,9 @@ class ExperimentSettings:
     enable_rewind: bool = True
     rewind_step_temperature: float = 0.4
     rewind_samples_per_depth: int = 0      # 0 -> reuse n_samples_per_k
+    rewind_answer_max_new_tokens: int = 64
+    rewind_sample_schedule: str = "flat"   # flat|pyramid
+    rewind_sample_min_per_depth: int = 1
     rewind_order: str = "reverse"          # reverse|forward
     compute_oracle_tail: bool = True
     rewind_process_reward_mode: str = "off"  # off|lite
@@ -3106,6 +3244,23 @@ def reanswer_many_from_rewind_tail(
     )
     return generate_many_outputs(backend, prompt, temperature=temperature, seeds=seeds)
 
+
+def rewind_tail_sample_count(
+    depth: int,
+    total_depth: int,
+    base_n: int,
+    *,
+    schedule: str = "flat",
+    min_n: int = 1,
+) -> int:
+    base_n = max(1, int(base_n))
+    min_n = max(1, min(int(min_n), base_n))
+    if schedule != "pyramid" or total_depth <= 0 or base_n <= min_n:
+        return base_n
+    centrality = 1.0 - (abs((2.0 * float(depth)) - float(total_depth)) / float(max(1, total_depth)))
+    centrality = max(0.0, min(1.0, centrality))
+    return max(min_n, int(round(min_n + (base_n - min_n) * centrality)))
+
 def compute_tail_curve(
     backend: Backend,
     question: str,
@@ -3117,26 +3272,39 @@ def compute_tail_curve(
     label: str,
 ) -> Dict[str, Any]:
     D = len(latest_to_earlier_steps)
-    n_samples = settings.rewind_samples_per_depth if settings.rewind_samples_per_depth > 0 else settings.n_samples_per_k
+    base_n_samples = settings.rewind_samples_per_depth if settings.rewind_samples_per_depth > 0 else settings.n_samples_per_k
     base_counter = Counter({str(k): int(v) for k, v in baseline_distribution.items()})
     save_raw = bool(settings.save_raw_generations)
 
     curve: List[CurvePoint] = []
     raw_answers_by_depth: List[Dict[str, Any]] = []
+    samples_by_depth: List[Dict[str, Any]] = []
     base_support = list(base_counter.keys())
 
     for depth in range(0, D + 1):
-        answers_depth = reanswer_many_from_rewind_tail(
-            backend,
-            question,
-            latest_to_earlier_steps,
+        n_samples = rewind_tail_sample_count(
             depth,
-            temperature=settings.temperature_reanswer,
-            seeds=[run_seed + 900_000 + depth * 1000 + j for j in range(n_samples)],
-            order=settings.rewind_order,
-            prompt_version=settings.prompt_version,
-            prompt_family=settings.prompt_family,
+            D,
+            base_n_samples,
+            schedule=settings.rewind_sample_schedule,
+            min_n=settings.rewind_sample_min_per_depth,
         )
+        with temporary_backend_generation_overrides(
+            backend,
+            max_new_tokens=settings.rewind_answer_max_new_tokens,
+        ):
+            answers_depth = reanswer_many_from_rewind_tail(
+                backend,
+                question,
+                latest_to_earlier_steps,
+                depth,
+                temperature=settings.temperature_reanswer,
+                seeds=[run_seed + 900_000 + depth * 1000 + j for j in range(n_samples)],
+                order=settings.rewind_order,
+                prompt_version=settings.prompt_version,
+                prompt_family=settings.prompt_family,
+            )
+        samples_by_depth.append({"depth": depth, "n_samples": n_samples})
         if save_raw:
             raw_answers_by_depth.append({"depth": depth, "answers": answers_depth[:]})
         dist_d = dist_from_answers(answers_depth)
@@ -3186,7 +3354,11 @@ def compute_tail_curve(
         "label": label,
         "depth_max": D,
         "order": settings.rewind_order,
-        "answer_calls": (D + 1) * n_samples,
+        "answer_calls": sum(int(item.get("n_samples", 0) or 0) for item in samples_by_depth),
+        "samples_by_depth": samples_by_depth,
+        "sample_schedule": settings.rewind_sample_schedule,
+        "sample_min_per_depth": settings.rewind_sample_min_per_depth,
+        "answer_max_new_tokens": settings.rewind_answer_max_new_tokens,
         "converge_depth": converge_depth,
         "collapse_depth": collapse_depth,
         "stabilization_max_slope": max_slope,
@@ -4485,6 +4657,9 @@ def summarize_runtime_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
         "rewind_total_generation_calls": (rewind_workload.get("rewind_total_generation_calls") if isinstance(rewind_workload, dict) else None),
     }
 
+def summarize_mlx_reuse_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+    return metrics.summarize_mlx_reuse_for_summary(res)
+
 def summarize_process_reward_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
     prm = res.get("trace_process_reward") or {}
     if not isinstance(prm, dict):
@@ -4640,6 +4815,9 @@ def parse_experiment_settings(cfg: Dict[str, Any]) -> ExperimentSettings:
         enable_rewind=bool(e.get("enable_rewind", True)),
         rewind_step_temperature=float(e.get("rewind_step_temperature", 0.4)),
         rewind_samples_per_depth=int(e.get("rewind_samples_per_depth", 0)),
+        rewind_answer_max_new_tokens=int(e.get("rewind_answer_max_new_tokens", 64)),
+        rewind_sample_schedule=str(e.get("rewind_sample_schedule", "flat")),
+        rewind_sample_min_per_depth=int(e.get("rewind_sample_min_per_depth", 1)),
         rewind_order=str(e.get("rewind_order", "reverse")),
         compute_oracle_tail=bool(e.get("compute_oracle_tail", True)),
         rewind_process_reward_mode=str(e.get("rewind_process_reward_mode", "off")),
@@ -4681,6 +4859,9 @@ def parse_experiment_settings(cfg: Dict[str, Any]) -> ExperimentSettings:
     s.rewind_process_reward_mode = s.rewind_process_reward_mode if s.rewind_process_reward_mode in ("off", "lite") else "off"
     s.rewind_step_candidates = max(1, s.rewind_step_candidates)
     s.rewind_samples_per_depth = max(0, s.rewind_samples_per_depth)
+    s.rewind_answer_max_new_tokens = max(8, s.rewind_answer_max_new_tokens)
+    s.rewind_sample_schedule = s.rewind_sample_schedule if s.rewind_sample_schedule in ("flat", "pyramid") else "flat"
+    s.rewind_sample_min_per_depth = max(1, s.rewind_sample_min_per_depth)
     s.rewind_novelty_max_similarity = max(0.0, min(1.0, s.rewind_novelty_max_similarity))
     s.rewind_novelty_retries = max(0, s.rewind_novelty_retries)
     s.rewind_escape_temperature = max(0.0, s.rewind_escape_temperature)
@@ -5074,6 +5255,9 @@ def run_one_backend_one_question(
             prompt_family=settings.prompt_family,
         )
         active_backend = LoggedBackend(backend, generation_logger)
+    reset_runtime_metrics = getattr(active_backend, "reset_runtime_metrics", None)
+    if callable(reset_runtime_metrics):
+        reset_runtime_metrics()
 
     # trace source
     trace: Trace
@@ -5170,6 +5354,11 @@ def run_one_backend_one_question(
         **stage_timings,
         "total_s": time.perf_counter() - t_total,
     }
+    snapshot_runtime_metrics = getattr(active_backend, "snapshot_runtime_metrics", None)
+    if callable(snapshot_runtime_metrics):
+        runtime_metrics = snapshot_runtime_metrics()
+        if isinstance(runtime_metrics, dict) and runtime_metrics:
+            res["runtime_metrics"] = runtime_metrics
 
     # persist
     out_path = os.path.join(out_dir, f"{backend.name}__{qid}.json")
@@ -5307,20 +5496,21 @@ def run_experiment(config_path: str) -> str:
                 "bridge_oracle_minus_recovered_best_auc": res.get("bridge_oracle_minus_recovered_best_auc"),
                 "permutation_tests": settings.permutation_tests,
             }
-            row.update(summarize_bridge_for_summary(res, "bridge_recovered"))
-            row.update(summarize_bridge_for_summary(res, "bridge_oracle"))
-            row.update(summarize_trace_vs_rewind_for_summary(res))
-            row.update(summarize_process_reward_for_summary(res))
-            row.update(summarize_trace_axes_for_summary(res))
-            row.update(summarize_rewind_core_for_summary(res))
-            row.update(summarize_rewind_process_reward_for_summary(res))
-            row.update(summarize_rewind_axes_for_summary(res))
-            row.update(summarize_runtime_for_summary(res))
+            row.update(metrics.summarize_bridge_for_summary(res, "bridge_recovered"))
+            row.update(metrics.summarize_bridge_for_summary(res, "bridge_oracle"))
+            row.update(metrics.summarize_trace_vs_rewind_for_summary(res))
+            row.update(metrics.summarize_process_reward_for_summary(res))
+            row.update(metrics.summarize_trace_axes_for_summary(res))
+            row.update(metrics.summarize_rewind_core_for_summary(res))
+            row.update(metrics.summarize_rewind_process_reward_for_summary(res))
+            row.update(metrics.summarize_rewind_axes_for_summary(res))
+            row.update(metrics.summarize_runtime_for_summary(res))
+            row.update(metrics.summarize_mlx_reuse_for_summary(res))
             summary_rows.append(row)
 
     # write summary CSV
     csv_path = os.path.join(out_dir, "summary.csv")
-    write_text(csv_path, to_csv(summary_rows))
+    write_text(csv_path, metrics.to_csv(summary_rows))
     print(f"[run] saved: {out_dir}")
     return out_dir
 
@@ -5376,6 +5566,9 @@ def run_quick_hf(args: argparse.Namespace) -> str:
         enable_rewind=not args.no_rewind,
         rewind_step_temperature=args.rewind_step_temp,
         rewind_samples_per_depth=args.rewind_samples_per_depth,
+        rewind_answer_max_new_tokens=args.rewind_answer_max_new_tokens,
+        rewind_sample_schedule=args.rewind_sample_schedule,
+        rewind_sample_min_per_depth=args.rewind_sample_min_per_depth,
         rewind_order=args.rewind_order,
         compute_oracle_tail=not args.no_oracle_tail,
         rewind_process_reward_mode=args.rewind_process_reward_mode,
@@ -5469,16 +5662,17 @@ def run_quick_hf(args: argparse.Namespace) -> str:
         "bridge_tail_source": res.get("bridge_tail_source"),
         "bridge_oracle_minus_recovered_best_auc": res.get("bridge_oracle_minus_recovered_best_auc"),
     }
-    summary_row.update(summarize_bridge_for_summary(res, "bridge_recovered"))
-    summary_row.update(summarize_bridge_for_summary(res, "bridge_oracle"))
-    summary_row.update(summarize_trace_vs_rewind_for_summary(res))
-    summary_row.update(summarize_process_reward_for_summary(res))
-    summary_row.update(summarize_trace_axes_for_summary(res))
-    summary_row.update(summarize_rewind_core_for_summary(res))
-    summary_row.update(summarize_rewind_process_reward_for_summary(res))
-    summary_row.update(summarize_rewind_axes_for_summary(res))
-    summary_row.update(summarize_runtime_for_summary(res))
-    write_text(os.path.join(out_dir, "summary.csv"), to_csv([summary_row]))
+    summary_row.update(metrics.summarize_bridge_for_summary(res, "bridge_recovered"))
+    summary_row.update(metrics.summarize_bridge_for_summary(res, "bridge_oracle"))
+    summary_row.update(metrics.summarize_trace_vs_rewind_for_summary(res))
+    summary_row.update(metrics.summarize_process_reward_for_summary(res))
+    summary_row.update(metrics.summarize_trace_axes_for_summary(res))
+    summary_row.update(metrics.summarize_rewind_core_for_summary(res))
+    summary_row.update(metrics.summarize_rewind_process_reward_for_summary(res))
+    summary_row.update(metrics.summarize_rewind_axes_for_summary(res))
+    summary_row.update(metrics.summarize_runtime_for_summary(res))
+    summary_row.update(metrics.summarize_mlx_reuse_for_summary(res))
+    write_text(os.path.join(out_dir, "summary.csv"), metrics.to_csv([summary_row]))
     print(f"[quick-hf] saved: {out_dir}")
     return out_dir
 
@@ -5517,6 +5711,9 @@ def run_quick_http(args: argparse.Namespace) -> str:
         enable_rewind=not args.no_rewind,
         rewind_step_temperature=args.rewind_step_temp,
         rewind_samples_per_depth=args.rewind_samples_per_depth,
+        rewind_answer_max_new_tokens=args.rewind_answer_max_new_tokens,
+        rewind_sample_schedule=args.rewind_sample_schedule,
+        rewind_sample_min_per_depth=args.rewind_sample_min_per_depth,
         rewind_order=args.rewind_order,
         compute_oracle_tail=not args.no_oracle_tail,
         rewind_process_reward_mode=args.rewind_process_reward_mode,
@@ -5599,16 +5796,17 @@ def run_quick_http(args: argparse.Namespace) -> str:
         "bridge_tail_source": res.get("bridge_tail_source"),
         "bridge_oracle_minus_recovered_best_auc": res.get("bridge_oracle_minus_recovered_best_auc"),
     }
-    summary_row.update(summarize_bridge_for_summary(res, "bridge_recovered"))
-    summary_row.update(summarize_bridge_for_summary(res, "bridge_oracle"))
-    summary_row.update(summarize_trace_vs_rewind_for_summary(res))
-    summary_row.update(summarize_process_reward_for_summary(res))
-    summary_row.update(summarize_trace_axes_for_summary(res))
-    summary_row.update(summarize_rewind_core_for_summary(res))
-    summary_row.update(summarize_rewind_process_reward_for_summary(res))
-    summary_row.update(summarize_rewind_axes_for_summary(res))
-    summary_row.update(summarize_runtime_for_summary(res))
-    write_text(os.path.join(out_dir, "summary.csv"), to_csv([summary_row]))
+    summary_row.update(metrics.summarize_bridge_for_summary(res, "bridge_recovered"))
+    summary_row.update(metrics.summarize_bridge_for_summary(res, "bridge_oracle"))
+    summary_row.update(metrics.summarize_trace_vs_rewind_for_summary(res))
+    summary_row.update(metrics.summarize_process_reward_for_summary(res))
+    summary_row.update(metrics.summarize_trace_axes_for_summary(res))
+    summary_row.update(metrics.summarize_rewind_core_for_summary(res))
+    summary_row.update(metrics.summarize_rewind_process_reward_for_summary(res))
+    summary_row.update(metrics.summarize_rewind_axes_for_summary(res))
+    summary_row.update(metrics.summarize_runtime_for_summary(res))
+    summary_row.update(metrics.summarize_mlx_reuse_for_summary(res))
+    write_text(os.path.join(out_dir, "summary.csv"), metrics.to_csv([summary_row]))
     print(f"[quick] saved: {out_dir}")
     return out_dir
 
@@ -5677,6 +5875,9 @@ experiment:
   enable_rewind: true
   rewind_step_temperature: 0.4
   rewind_samples_per_depth: 0   # 0 -> reuse n_samples_per_k
+  rewind_answer_max_new_tokens: 64
+  rewind_sample_schedule: flat   # flat | pyramid
+  rewind_sample_min_per_depth: 1
   rewind_order: reverse         # reverse or forward
   compute_oracle_tail: true
   rewind_process_reward_mode: off   # off | lite
@@ -5754,6 +5955,9 @@ def add_common_curve_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-rewind", action="store_true", help="Disable rewind-side reconstruction / tail curves.")
     p.add_argument("--rewind-step-temp", type=float, default=0.4)
     p.add_argument("--rewind-samples-per-depth", type=int, default=0, help="0 -> reuse --n-per-k")
+    p.add_argument("--rewind-answer-max-new-tokens", type=int, default=64, help="Max new tokens for rewind tail/oracle answer decoding.")
+    p.add_argument("--rewind-sample-schedule", choices=["flat", "pyramid"], default="flat", help="How to allocate rewind tail/oracle samples across depths.")
+    p.add_argument("--rewind-sample-min-per-depth", type=int, default=1, help="Minimum samples per depth when using a non-flat rewind sample schedule.")
     p.add_argument("--rewind-order", choices=["reverse", "forward"], default="reverse")
     p.add_argument("--no-oracle-tail", action="store_true", help="Skip oracle tail curve from original final steps.")
     p.add_argument("--rewind-process-reward-mode", default="off", choices=["off", "lite"], help="Pseudo-PRM mode for reranking multiple rewind-step candidates at each depth.")

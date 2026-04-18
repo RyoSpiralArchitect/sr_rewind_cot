@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import sr_rewind_cot as spbc
+import sr_rewind_cot_metrics as spmetrics
 
 
 def _tempdir():
@@ -111,6 +112,47 @@ class TestNamingAndPromptAssets(unittest.TestCase):
         self.assertEqual(len(questions), 6)
         self.assertEqual(questions[0]["id"], "q1")
         self.assertIn("binary search", questions[0]["question"].lower())
+
+    def test_reconstructed_text_question_set_exists(self) -> None:
+        if spbc.yaml is None:
+            self.skipTest("pyyaml not available")
+        path = Path(spbc.SCRIPT_DIR) / "sr_rewind_cot_assets" / "question_sets" / "general_reasoning_pascal_text_reconstructed_20260409.yaml"
+        self.assertTrue(path.exists())
+        cfg = spbc.load_config(str(path))
+        experiment = cfg.get("experiment") or {}
+        questions = cfg.get("questions") or []
+        self.assertEqual(experiment.get("trace_format"), "text")
+        self.assertEqual(experiment.get("prompt_family"), "general_reasoning")
+        self.assertEqual(len(questions), 1)
+        self.assertIn("pascal", questions[0]["question"].lower())
+
+    def test_general_reasoning_text_question_set_exists(self) -> None:
+        if spbc.yaml is None:
+            self.skipTest("pyyaml not available")
+        path = Path(spbc.SCRIPT_DIR) / "sr_rewind_cot_assets" / "question_sets" / "general_reasoning_observation_v1_text.yaml"
+        self.assertTrue(path.exists())
+        cfg = spbc.load_config(str(path))
+        experiment = cfg.get("experiment") or {}
+        questions = cfg.get("questions") or []
+        self.assertEqual(experiment.get("trace_format"), "text")
+        self.assertEqual(experiment.get("prompt_family"), "general_reasoning")
+        self.assertEqual(len(questions), 6)
+        self.assertIn("binary search", questions[0]["question"].lower())
+
+    def test_general_reasoning_fast_and_full_profiles_exist(self) -> None:
+        if spbc.yaml is None:
+            self.skipTest("pyyaml not available")
+        base = Path(spbc.SCRIPT_DIR) / "sr_rewind_cot_assets" / "question_sets"
+        fast = spbc.load_config(str(base / "general_reasoning_observation_v1_fast.yaml"))
+        full = spbc.load_config(str(base / "general_reasoning_observation_v1_full.yaml"))
+        fast_exp = fast.get("experiment") or {}
+        full_exp = full.get("experiment") or {}
+        self.assertEqual(len(fast.get("questions") or []), 6)
+        self.assertEqual(len(full.get("questions") or []), 6)
+        self.assertEqual(fast_exp.get("rewind_sample_schedule"), "pyramid")
+        self.assertEqual(full_exp.get("rewind_sample_schedule"), "flat")
+        self.assertEqual(fast_exp.get("rewind_answer_max_new_tokens"), 48)
+        self.assertEqual(full_exp.get("rewind_answer_max_new_tokens"), 64)
 
     def test_v2_prompt_family_guidance_is_injected(self) -> None:
         prompt = spbc.build_trace_prompt(
@@ -693,6 +735,7 @@ class TestHFBackendSelection(unittest.TestCase):
         backend._tokenizer = object()
         backend._loaded = True
         backend._runtime_backend = "mlx"
+        backend.reset_runtime_metrics()
 
         captured_prompts = []
         captured_caches = []
@@ -739,6 +782,20 @@ class TestHFBackendSelection(unittest.TestCase):
         self.assertIsNot(captured_caches[0], base_cache)
         self.assertIsNot(captured_caches[1], base_cache)
         self.assertIsNot(captured_caches[0], captured_caches[1])
+        metrics = backend.snapshot_runtime_metrics()
+        reuse = (metrics.get("mlx_prompt_reuse") or {})
+        self.assertEqual(reuse.get("batch_calls_total"), 1)
+        self.assertEqual(reuse.get("batch_samples_total"), 2)
+        self.assertEqual(reuse.get("cache_reuse_calls"), 1)
+        self.assertEqual(reuse.get("cache_reuse_samples"), 2)
+        self.assertEqual(reuse.get("prompt_tokens_total"), 3)
+        self.assertEqual(reuse.get("prefix_tokens_total"), 2)
+        self.assertEqual(reuse.get("suffix_tokens_total"), 1)
+        self.assertEqual(reuse.get("saved_prefill_tokens_est"), 2)
+        self.assertEqual(reuse.get("cache_deepcopy_calls"), 2)
+        self.assertEqual(reuse.get("output_chars_total"), 24)
+        self.assertEqual(reuse.get("output_tokens_est_total"), 0)
+        self.assertEqual(((reuse.get("stages") or {}).get("unknown") or {}).get("saved_prefill_tokens_est"), 2)
 
 
 class _StubBackend:
@@ -952,6 +1009,49 @@ class TestBatchGenerationReuse(unittest.TestCase):
         self.assertTrue(all(len(call["seeds"]) == 2 for call in tail_calls))
         self.assertEqual(curve["answer_calls"], 6)
 
+    def test_tail_curve_can_trim_decode_and_use_pyramid_sample_schedule(self) -> None:
+        class _RewindBatchBackend:
+            def __init__(self) -> None:
+                self.name = "rewind-batch"
+                self.max_new_tokens = 256
+                self.many_calls = []
+
+            def generate(self, prompt: str, temperature: float, seed=None) -> str:
+                return "stable answer"
+
+            def generate_many(self, prompt: str, temperature: float, seeds):
+                self.many_calls.append({
+                    "prompt": prompt,
+                    "temperature": temperature,
+                    "seeds": list(seeds),
+                    "max_new_tokens": self.max_new_tokens,
+                })
+                return ["stable answer" for _ in seeds]
+
+        backend = _RewindBatchBackend()
+        settings = spbc.ExperimentSettings(
+            rewind_samples_per_depth=5,
+            rewind_answer_max_new_tokens=32,
+            rewind_sample_schedule="pyramid",
+            rewind_sample_min_per_depth=2,
+        )
+        curve = spbc.compute_tail_curve(
+            backend,
+            "Why does binary search require a sorted array?",
+            ["step 1", "step 2"],
+            settings,
+            run_seed=456,
+            baseline_A_star="stable answer",
+            baseline_distribution={"stable answer": 2},
+            label="recovered",
+        )
+        self.assertEqual([len(call["seeds"]) for call in backend.many_calls], [2, 5, 2])
+        self.assertTrue(all(call["max_new_tokens"] == 32 for call in backend.many_calls))
+        self.assertEqual(curve["answer_calls"], 9)
+        self.assertEqual(curve["sample_schedule"], "pyramid")
+        self.assertEqual(curve["sample_min_per_depth"], 2)
+        self.assertEqual(curve["answer_max_new_tokens"], 32)
+
 
 class TestRewindProcessRewardLite(unittest.TestCase):
     def test_rewind_prm_lite_prefers_atomic_candidate(self) -> None:
@@ -1065,6 +1165,79 @@ class TestRewindProcessRewardLite(unittest.TestCase):
         self.assertEqual(summary["rewind_trace_attempts"], 4)
         self.assertEqual(summary["rewind_total_generation_calls"], 62)
         self.assertAlmostEqual(float(summary["time_rewind_total_s"] or 0.0), 0.66, places=6)
+
+    def test_runtime_summary_includes_mlx_reuse_metrics(self) -> None:
+        summary = spbc.summarize_mlx_reuse_for_summary({
+            "runtime_metrics": {
+                "mlx_prompt_reuse": {
+                    "batch_calls_total": 7,
+                    "batch_samples_total": 35,
+                    "cache_reuse_calls": 7,
+                    "cache_reuse_samples": 35,
+                    "prompt_tokens_total": 700,
+                    "prefix_tokens_total": 630,
+                    "suffix_tokens_total": 70,
+                    "naive_prefill_tokens_est": 3500,
+                    "actual_prefill_tokens_est": 910,
+                    "saved_prefill_tokens_est": 2590,
+                    "cache_prepare_s_total": 1.25,
+                    "batch_total_s": 18.5,
+                    "cache_deepcopy_calls": 35,
+                    "cache_deepcopy_s_total": 0.42,
+                    "output_chars_total": 4000,
+                    "output_tokens_est_total": 1200,
+                    "stages": {
+                        "rewind_answer": {
+                            "batch_calls_total": 7,
+                            "batch_samples_total": 35,
+                            "saved_prefill_tokens_est": 2590,
+                            "output_tokens_est_total": 1200,
+                        }
+                    },
+                }
+            }
+        })
+        self.assertEqual(summary["mlx_reuse_batch_calls"], 7)
+        self.assertEqual(summary["mlx_reuse_batch_samples"], 35)
+        self.assertEqual(summary["mlx_reuse_saved_prefill_tokens_est"], 2590)
+        self.assertAlmostEqual(float(summary["mlx_reuse_saved_prefill_ratio_est"] or 0.0), 2590.0 / 3500.0, places=6)
+        self.assertEqual(summary["mlx_reuse_rewind_answer_calls"], 7)
+        self.assertEqual(summary["mlx_reuse_rewind_answer_samples"], 35)
+        self.assertAlmostEqual(float(summary["mlx_reuse_output_tokens_per_s_est"] or 0.0), 1200.0 / 18.5, places=6)
+        self.assertEqual(summary["mlx_reuse_rewind_answer_output_tokens_est_total"], 1200)
+
+
+class TestMetricsCliHelpers(unittest.TestCase):
+    def test_metrics_module_compare_aggregates_summary_rows(self) -> None:
+        with _tempdir() as td:
+            left = td / "left"
+            right = td / "right"
+            left.mkdir()
+            right.mkdir()
+            (left / "summary.csv").write_text(
+                spmetrics.to_csv([
+                    {"question_id": "q1", "time_total_s": 10, "mlx_reuse_saved_prefill_tokens_est": 100},
+                    {"question_id": "q2", "time_total_s": 20, "mlx_reuse_saved_prefill_tokens_est": 200},
+                ]),
+                encoding="utf-8",
+            )
+            (right / "summary.csv").write_text(
+                spmetrics.to_csv([
+                    {"question_id": "q1", "time_total_s": 12, "mlx_reuse_saved_prefill_tokens_est": 140},
+                    {"question_id": "q2", "time_total_s": 19, "mlx_reuse_saved_prefill_tokens_est": 260},
+                ]),
+                encoding="utf-8",
+            )
+
+            left_rows = spmetrics.read_summary_rows(str(left))
+            right_rows = spmetrics.read_summary_rows(str(right))
+            self.assertEqual(len(left_rows), 2)
+            self.assertEqual(spmetrics.resolve_summary_path(str(left)), left / "summary.csv")
+
+            left_agg = spmetrics.numeric_aggregate(left_rows, ["time_total_s", "mlx_reuse_saved_prefill_tokens_est"])
+            right_agg = spmetrics.numeric_aggregate(right_rows, ["time_total_s", "mlx_reuse_saved_prefill_tokens_est"])
+            self.assertEqual(left_agg["time_total_s"], 30.0)
+            self.assertEqual(right_agg["mlx_reuse_saved_prefill_tokens_est"], 400.0)
 
 
 if __name__ == "__main__":

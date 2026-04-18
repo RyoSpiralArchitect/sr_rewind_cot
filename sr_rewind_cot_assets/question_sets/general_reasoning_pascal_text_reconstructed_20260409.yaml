@@ -1,0 +1,108 @@
+# Reconstructed from results/run_20260409_070922/llama-3.2-it__q1.json
+# and the paired generations JSONL.
+#
+# Exact from artifact:
+# - prompt_version: v2
+# - prompt_family: general_reasoning
+# - trace_mode: masked
+# - trace_format: text
+# - runtime_backend: mlx
+# - question: Pascal's Wager vs agnostic theism
+# - n_samples_baseline: 9
+# - n_samples_per_k: 9
+# - temperature_trace: 0.0
+# - temperature_reanswer: 0.8
+# - rewind_step_temperature: 0.0
+# - bridge_middle_temperature: 0.0
+# - bridge_middle_cases: 5
+#
+# Inferred from neighboring defaults and stage counts:
+# - hf_backend: auto
+# - max_new_tokens: 256
+# - max_steps: 40
+# - trace_source: per_backend
+# - rewind_process_reward_mode: off
+# - rewind_step_candidates: 1
+# - rewind_novelty_retries: 0
+
+api:
+  timeout_s: 180
+
+backends:
+  - name: llama-3.2-it
+    type: hf_local
+    model: "./model/llama-3.2-3b"
+    device: "mps"
+    hf_backend: "auto"
+    dtype: "float16"
+    max_new_tokens: 256
+    top_p: 1.0
+    top_k: 50
+    repetition_penalty: 1.0
+
+experiment:
+  trace_mode: "masked"
+  trace_source: "per_backend"
+  trace_format: "text"
+  stream_output: false
+  temperature_trace: 0.0
+  process_reward_mode: "off"
+  trace_candidates: 1
+  trace_candidate_temperature: 0.4
+  temperature_reanswer: 0.8
+  n_samples_baseline: 9
+  n_samples_per_k: 9
+  tau: 0.8
+  max_steps: 40
+  prompt_version: "v2"
+  prompt_family: "general_reasoning"
+
+  baseline_min_conf: null
+  baseline_max_entropy: null
+  skip_unstable_baseline: false
+
+  smooth_window: 1
+  converge_min_run: 1
+  collapse_min_run: 1
+
+  compute_divergence: true
+  divergence_alpha: 1.0e-6
+
+  permutation_tests: 0
+  permutation_seed: 1234
+
+  enable_rewind: true
+  rewind_step_temperature: 0.0
+  rewind_samples_per_depth: 9
+  rewind_order: "reverse"
+  compute_oracle_tail: true
+  rewind_process_reward_mode: "off"
+  rewind_step_candidates: 1
+  rewind_novelty_max_similarity: 0.82
+  rewind_novelty_retries: 0
+  rewind_escape_temperature: 0.6
+  rewind_step_top_p: 0.9
+  rewind_step_repetition_penalty: 1.05
+
+  enable_bridge: true
+  bridge_tail_source: "recovered"
+  bridge_samples_per_cell: 0
+  bridge_num_prefix_points: 0
+  bridge_num_tail_points: 0
+  bridge_allow_overlap: false
+  bridge_middle_temperature: 0.0
+  bridge_reconstruct_middle: true
+  bridge_middle_cases: 5
+  bridge_loop_closure_samples: 3
+  bridge_core_cluster_similarity: 0.72
+  bridge_core_min_loop_closure: 0.75
+  bridge_core_min_match: 0.75
+  bridge_core_min_synergy: 0.0
+  bridge_core_top_prototypes: 6
+
+  save_raw_generations: true
+  save_generation_log_jsonl: true
+
+questions:
+  - id: q1
+    question: "What is the fundamental difference between Pascal's Wager and agnostic theism?"

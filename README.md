@@ -39,6 +39,7 @@ This makes it useful for experiments about:
 - Optionally rerank multiple rewind-step candidates with the same pseudo Process Reward Model idea, so forward and reverse reasoning can be compared under matched heuristics.
 - Stream the forward trace first, then stream rewind recovery.
 - Reuse exact-prompt MLX prefills on rewind-tail and oracle-tail sweeps, where repeated answer sampling hits the same prompt many times.
+- Trim rewind-tail decode with a dedicated max-token cap and depthwise sample schedules such as `flat` or `pyramid`.
 - Save raw generations and prompt/output logs as JSONL for inspection.
 - Save atomic `step_records` so steps can be analyzed as structured claims instead of only flat strings.
 - Compute forward stability curves, entropy, divergence, rewind novelty, fixed-point depth, and core-strength style metrics.
@@ -148,6 +149,31 @@ python3 sr_rewind_cot.py plot --run-dir results/run_YYYYMMDD_HHMMSS
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v1.yaml
 ```
 
+### 5a. Run the explicit fast profile
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v1_fast.yaml
+```
+
+### 5b. Run the explicit full profile
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v1_full.yaml
+```
+
+When to use `fast` vs `full`:
+
+- Use `fast` for quick sweeps, prompt iteration, and profiling loops.
+- Use `full` for slower, more conservative rewind comparisons when you want to inspect the results closely.
+- Actual runtime can still vary a lot with trace length and question behavior, so compare both on the same batch when in doubt.
+
+### 6. Inspect or compare metrics without rerunning the experiment
+
+```bash
+python3 sr_rewind_cot_metrics.py show --run results/run_YYYYMMDD_HHMMSS
+python3 sr_rewind_cot_metrics.py compare --left results/run_A --right results/run_B --aggregate
+```
+
 ## Outputs
 
 Each run writes a timestamped directory under `results/`.
@@ -179,6 +205,7 @@ Typical plots include:
 - `trace_vs_rewind_preservation_rate`: how much of the forward trace survives rewind alignment
 - `rewind_axis_base_prm_preservation_rate`: how different the raw rewind path is from the PRM-guided rewind path
 - `time_rewind_total_s` and `rewind_total_generation_calls`: where rewind runtime is actually being spent
+- `mlx_reuse_saved_prefill_tokens_est`, `mlx_reuse_cache_prepare_s_total`, and `mlx_reuse_output_tokens_per_s_est`: whether MLX prompt-cache reuse is likely saving prefill work while decode remains the real bottleneck
 
 These metrics are most useful together. A run can have unstable answers but still show a very strong semantic attractor in rewind space.
 

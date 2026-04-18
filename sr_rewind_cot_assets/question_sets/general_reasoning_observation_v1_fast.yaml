@@ -1,6 +1,6 @@
-# Small observation batch for general_reasoning.
-# Backward-compatible main profile. This currently tracks the faster tuned setup;
-# for explicit choices, see the sibling *_fast.yaml and *_full.yaml files.
+# Fast observation batch for general_reasoning.
+# This profile keeps the same six questions as the main set, but trims rewind decode
+# and uses a depthwise pyramid sample schedule to reduce runtime substantially.
 
 api:
   timeout_s: 180

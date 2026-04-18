@@ -1,6 +1,6 @@
-# Small observation batch for general_reasoning.
-# Backward-compatible main profile. This currently tracks the faster tuned setup;
-# for explicit choices, see the sibling *_fast.yaml and *_full.yaml files.
+# Full observation batch for general_reasoning.
+# This profile keeps rewind tail/oracle decoding less constrained so structural
+# comparisons stay closer to the earlier high-fidelity runs.
 
 api:
   timeout_s: 180
@@ -51,9 +51,9 @@ experiment:
   enable_rewind: true
   rewind_step_temperature: 0.5
   rewind_samples_per_depth: 5
-  rewind_answer_max_new_tokens: 48
-  rewind_sample_schedule: "pyramid"
-  rewind_sample_min_per_depth: 3
+  rewind_answer_max_new_tokens: 64
+  rewind_sample_schedule: "flat"
+  rewind_sample_min_per_depth: 1
   rewind_order: "reverse"
   compute_oracle_tail: true
   rewind_process_reward_mode: "lite"

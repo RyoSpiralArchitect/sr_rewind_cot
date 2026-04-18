@@ -8,5 +8,8 @@ Task family guidance:
 {{FAMILY_GUIDANCE}}
 
 First mentally unroll this rewind-side trace into the forward direction, infer any missing earlier context if helpful, then give ONLY the final answer.
+Answer in exactly one short sentence or noun phrase.
+Keep it under 20 words if possible.
+Do not restate the partial rewind trace.
 No explanation.
 No extra text.

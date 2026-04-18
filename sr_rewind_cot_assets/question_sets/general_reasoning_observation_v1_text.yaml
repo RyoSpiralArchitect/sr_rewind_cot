@@ -1,6 +1,5 @@
-# Small observation batch for general_reasoning.
-# Backward-compatible main profile. This currently tracks the faster tuned setup;
-# for explicit choices, see the sibling *_fast.yaml and *_full.yaml files.
+# Text-mode sibling of general_reasoning_observation_v1.yaml.
+# Keeps the same question batch so json vs text traces stay easy to compare.
 
 api:
   timeout_s: 180
@@ -12,7 +11,7 @@ backends:
     device: "mps"
     hf_backend: "auto"
     dtype: "float16"
-    max_new_tokens: 256
+    max_new_tokens: 384
     top_p: 1.0
     top_k: 50
     repetition_penalty: 1.0
@@ -20,7 +19,7 @@ backends:
 experiment:
   trace_mode: "masked"
   trace_source: "per_backend"
-  trace_format: "json"
+  trace_format: "text"
   stream_output: false
   temperature_trace: 0.0
   process_reward_mode: "lite"
@@ -51,9 +50,6 @@ experiment:
   enable_rewind: true
   rewind_step_temperature: 0.5
   rewind_samples_per_depth: 5
-  rewind_answer_max_new_tokens: 48
-  rewind_sample_schedule: "pyramid"
-  rewind_sample_min_per_depth: 3
   rewind_order: "reverse"
   compute_oracle_tail: true
   rewind_process_reward_mode: "lite"

@@ -1,6 +1,29 @@
-# Small observation batch for general_reasoning.
-# Backward-compatible main profile. This currently tracks the faster tuned setup;
-# for explicit choices, see the sibling *_fast.yaml and *_full.yaml files.
+# Reconstructed from results/run_20260409_070922/llama-3.2-it__q1.json
+# and the paired generations JSONL.
+#
+# Exact from artifact:
+# - prompt_version: v2
+# - prompt_family: general_reasoning
+# - trace_mode: masked
+# - trace_format: text
+# - runtime_backend: mlx
+# - question: Pascal's Wager vs agnostic theism
+# - n_samples_baseline: 9
+# - n_samples_per_k: 9
+# - temperature_trace: 0.0
+# - temperature_reanswer: 0.8
+# - rewind_step_temperature: 0.0
+# - bridge_middle_temperature: 0.0
+# - bridge_middle_cases: 5
+#
+# Inferred from neighboring defaults and stage counts:
+# - hf_backend: auto
+# - max_new_tokens: 256
+# - max_steps: 40
+# - trace_source: per_backend
+# - rewind_process_reward_mode: off
+# - rewind_step_candidates: 1
+# - rewind_novelty_retries: 0
 
 api:
   timeout_s: 180
@@ -20,17 +43,17 @@ backends:
 experiment:
   trace_mode: "masked"
   trace_source: "per_backend"
-  trace_format: "json"
+  trace_format: "text"
   stream_output: false
   temperature_trace: 0.0
-  process_reward_mode: "lite"
-  trace_candidates: 4
-  trace_candidate_temperature: 0.6
-  temperature_reanswer: 0.4
-  n_samples_baseline: 5
-  n_samples_per_k: 5
+  process_reward_mode: "off"
+  trace_candidates: 1
+  trace_candidate_temperature: 0.4
+  temperature_reanswer: 0.8
+  n_samples_baseline: 9
+  n_samples_per_k: 9
   tau: 0.8
-  max_steps: 24
+  max_steps: 40
   prompt_version: "v2"
   prompt_family: "general_reasoning"
 
@@ -49,26 +72,23 @@ experiment:
   permutation_seed: 1234
 
   enable_rewind: true
-  rewind_step_temperature: 0.5
-  rewind_samples_per_depth: 5
-  rewind_answer_max_new_tokens: 48
-  rewind_sample_schedule: "pyramid"
-  rewind_sample_min_per_depth: 3
+  rewind_step_temperature: 0.0
+  rewind_samples_per_depth: 9
   rewind_order: "reverse"
   compute_oracle_tail: true
-  rewind_process_reward_mode: "lite"
-  rewind_step_candidates: 3
+  rewind_process_reward_mode: "off"
+  rewind_step_candidates: 1
   rewind_novelty_max_similarity: 0.82
-  rewind_novelty_retries: 3
-  rewind_escape_temperature: 0.8
+  rewind_novelty_retries: 0
+  rewind_escape_temperature: 0.6
   rewind_step_top_p: 0.9
   rewind_step_repetition_penalty: 1.05
 
-  enable_bridge: false
+  enable_bridge: true
   bridge_tail_source: "recovered"
   bridge_samples_per_cell: 0
-  bridge_num_prefix_points: 9
-  bridge_num_tail_points: 9
+  bridge_num_prefix_points: 0
+  bridge_num_tail_points: 0
   bridge_allow_overlap: false
   bridge_middle_temperature: 0.0
   bridge_reconstruct_middle: true
@@ -85,14 +105,4 @@ experiment:
 
 questions:
   - id: q1
-    question: "Why does binary search require a sorted array in order to work correctly?"
-  - id: q2
-    question: "Why does increasing humidity often make hot weather feel more uncomfortable to humans?"
-  - id: q3
-    question: "Why can correlation be useful for prediction but still be insufficient for causal explanation?"
-  - id: q4
-    question: "Why can a policy improve average outcomes while still being unfair to a subgroup?"
-  - id: q5
     question: "What is the fundamental difference between Pascal's Wager and agnostic theism?"
-  - id: q6
-    question: "Why do map projections necessarily distort some geographic properties even when they are mathematically precise?"

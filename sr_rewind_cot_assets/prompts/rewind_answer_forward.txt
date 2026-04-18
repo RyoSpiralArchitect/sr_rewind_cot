@@ -5,5 +5,8 @@ Partial rewind trace ({{ORDER_DESC}}):
 {{BLOCK}}
 
 Use this tail-side partial trace if helpful, infer any missing context, and give ONLY the final answer.
+Answer in exactly one short sentence or noun phrase.
+Keep it under 20 words if possible.
+Do not restate the partial rewind trace.
 No explanation.
 No extra text.

@@ -27,6 +27,20 @@ Current files:
   the backend a slightly larger generation budget so open-ended traces are less
   likely to truncate mid-answer.
 
+- `general_reasoning_speculative_v1_fast.yaml`
+  A smaller fast profile built around three more speculative general-reasoning prompts.
+  It is useful when you want to probe semantic-core collapse and norm-conflict structure
+  without paying for the full six-question batch.
+
+- `general_reasoning_speculative_v1_text.yaml`
+  Text-mode sibling of the speculative fast profile. It is useful when the same
+  three questions produce good semantics but noisy JSON structure.
+
+- `general_reasoning_observation_v2_fast.yaml` and `general_reasoning_observation_v2_full.yaml`
+  Nine-question extensions of the base observation set. They keep the original six
+  explanatory prompts and add the three speculative prompts so one batch can cover
+  both explanatory and more open-ended reasoning behavior.
+
 - `general_reasoning_pascal_text_reconstructed_20260409.yaml`
   A single-question reconstruction of the earlier text-trace experiment recovered
   from `results/run_20260409_070922/`. This preserves the pre-JSON `general_reasoning`
@@ -55,6 +69,22 @@ python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general
 
 ```bash
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v1_text.yaml
+```
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_speculative_v1_fast.yaml
+```
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_speculative_v1_text.yaml
+```
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v2_fast.yaml
+```
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v2_full.yaml
 ```
 
 ```bash

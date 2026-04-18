@@ -154,6 +154,52 @@ class TestNamingAndPromptAssets(unittest.TestCase):
         self.assertEqual(fast_exp.get("rewind_answer_max_new_tokens"), 48)
         self.assertEqual(full_exp.get("rewind_answer_max_new_tokens"), 64)
 
+    def test_general_reasoning_speculative_fast_profile_exists(self) -> None:
+        if spbc.yaml is None:
+            self.skipTest("pyyaml not available")
+        base = Path(spbc.SCRIPT_DIR) / "sr_rewind_cot_assets" / "question_sets"
+        cfg = spbc.load_config(str(base / "general_reasoning_speculative_v1_fast.yaml"))
+        exp = cfg.get("experiment") or {}
+        questions = cfg.get("questions") or []
+        self.assertEqual(len(questions), 3)
+        self.assertEqual(exp.get("rewind_sample_schedule"), "pyramid")
+        self.assertEqual(exp.get("rewind_answer_max_new_tokens"), 48)
+        self.assertIn("dictionaries", questions[1]["question"].lower())
+
+    def test_general_reasoning_speculative_text_profile_exists(self) -> None:
+        if spbc.yaml is None:
+            self.skipTest("pyyaml not available")
+        base = Path(spbc.SCRIPT_DIR) / "sr_rewind_cot_assets" / "question_sets"
+        cfg = spbc.load_config(str(base / "general_reasoning_speculative_v1_text.yaml"))
+        exp = cfg.get("experiment") or {}
+        questions = cfg.get("questions") or []
+        self.assertEqual(len(questions), 3)
+        self.assertEqual(exp.get("trace_format"), "text")
+        self.assertEqual(exp.get("rewind_sample_schedule"), "pyramid")
+        self.assertEqual(exp.get("rewind_answer_max_new_tokens"), 48)
+        self.assertIn("norm", questions[2]["question"].lower())
+
+    def test_general_reasoning_v2_profiles_exist(self) -> None:
+        if spbc.yaml is None:
+            self.skipTest("pyyaml not available")
+        base = Path(spbc.SCRIPT_DIR) / "sr_rewind_cot_assets" / "question_sets"
+        fast = spbc.load_config(str(base / "general_reasoning_observation_v2_fast.yaml"))
+        full = spbc.load_config(str(base / "general_reasoning_observation_v2_full.yaml"))
+        fast_exp = fast.get("experiment") or {}
+        full_exp = full.get("experiment") or {}
+        self.assertEqual(len(fast.get("questions") or []), 9)
+        self.assertEqual(len(full.get("questions") or []), 9)
+        self.assertEqual(fast_exp.get("rewind_sample_schedule"), "pyramid")
+        self.assertEqual(full_exp.get("rewind_sample_schedule"), "flat")
+        self.assertIn("negated", (fast.get("questions") or [])[6]["question"].lower())
+
+    def test_docs_exist(self) -> None:
+        base = Path(spbc.SCRIPT_DIR) / "docs"
+        self.assertTrue((base / "README.md").exists())
+        self.assertTrue((base / "general_reasoning_speculative_v1.md").exists())
+        self.assertTrue((base / "plot_field_guide.md").exists())
+        self.assertTrue((base / "roadmap.md").exists())
+
     def test_v2_prompt_family_guidance_is_injected(self) -> None:
         prompt = spbc.build_trace_prompt(
             "Find the general term.",

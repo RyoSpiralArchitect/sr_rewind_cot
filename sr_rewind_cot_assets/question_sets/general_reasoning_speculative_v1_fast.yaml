@@ -1,0 +1,93 @@
+# Fast speculative observation batch for general_reasoning.
+# This keeps the lighter rewind decode settings from the main fast profile, but swaps in
+# three more open-ended philosophical / normative questions that are likely to expose
+# semantic-core collapse, institutional-vs-social acceptance, and norm-conflict reversal.
+
+api:
+  timeout_s: 180
+
+backends:
+  - name: llama-3.2-it
+    type: hf_local
+    model: "./model/llama-3.2-3b"
+    device: "mps"
+    hf_backend: "auto"
+    dtype: "float16"
+    max_new_tokens: 256
+    top_p: 1.0
+    top_k: 50
+    repetition_penalty: 1.0
+
+experiment:
+  trace_mode: "masked"
+  trace_source: "per_backend"
+  trace_format: "json"
+  stream_output: false
+  temperature_trace: 0.0
+  process_reward_mode: "lite"
+  trace_candidates: 4
+  trace_candidate_temperature: 0.6
+  temperature_reanswer: 0.4
+  n_samples_baseline: 5
+  n_samples_per_k: 5
+  tau: 0.8
+  max_steps: 24
+  prompt_version: "v2"
+  prompt_family: "general_reasoning"
+
+  baseline_min_conf: null
+  baseline_max_entropy: null
+  skip_unstable_baseline: false
+
+  smooth_window: 1
+  converge_min_run: 1
+  collapse_min_run: 1
+
+  compute_divergence: true
+  divergence_alpha: 1.0e-6
+
+  permutation_tests: 0
+  permutation_seed: 1234
+
+  enable_rewind: true
+  rewind_step_temperature: 0.5
+  rewind_samples_per_depth: 5
+  rewind_answer_max_new_tokens: 48
+  rewind_sample_schedule: "pyramid"
+  rewind_sample_min_per_depth: 3
+  rewind_order: "reverse"
+  compute_oracle_tail: true
+  rewind_process_reward_mode: "lite"
+  rewind_step_candidates: 3
+  rewind_novelty_max_similarity: 0.82
+  rewind_novelty_retries: 3
+  rewind_escape_temperature: 0.8
+  rewind_step_top_p: 0.9
+  rewind_step_repetition_penalty: 1.05
+
+  enable_bridge: false
+  bridge_tail_source: "recovered"
+  bridge_samples_per_cell: 0
+  bridge_num_prefix_points: 9
+  bridge_num_tail_points: 9
+  bridge_allow_overlap: false
+  bridge_middle_temperature: 0.0
+  bridge_reconstruct_middle: true
+  bridge_middle_cases: 5
+  bridge_loop_closure_samples: 3
+  bridge_core_cluster_similarity: 0.72
+  bridge_core_min_loop_closure: 0.75
+  bridge_core_min_match: 0.75
+  bridge_core_min_synergy: 0.0
+  bridge_core_top_prototypes: 6
+
+  save_raw_generations: true
+  save_generation_log_jsonl: true
+
+questions:
+  - id: q1
+    question: "If denying the existence of something is one way of marking its possible existence, can we meaningfully speak of something that truly exists but cannot be erased or negated?"
+  - id: q2
+    question: "If an incorrect usage becomes widespread enough to be recorded in dictionaries and is labeled as incorrect, does it then become institutionally recognized as a misusage, or has its meaning already been socially accepted despite that label?"
+  - id: q3
+    question: "When one fact violates one norm but is justified under another, what conditions cause the second norm to override the first?"

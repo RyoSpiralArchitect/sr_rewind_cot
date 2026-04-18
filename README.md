@@ -64,6 +64,7 @@ In many runs, "failure" is still informative. A rewind operator that falls into 
 - [sr_rewind_cot.py](./sr_rewind_cot.py): main CLI and research harness
 - [sr_rewind_cot_assets/prompts](./sr_rewind_cot_assets/prompts): external prompt templates and task-family guidance
 - [sr_rewind_cot_assets/question_sets](./sr_rewind_cot_assets/question_sets): ready-to-run observation batches and reusable question packs
+- [docs](./docs): research notes, plot reading guides, and roadmap-oriented writing
 - [tests/test_sr_rewind_cot.py](./tests/test_sr_rewind_cot.py): targeted regression tests for parsing, rewind behavior, streaming, and metrics
 
 ## Installation
@@ -161,6 +162,30 @@ python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v1_full.yaml
 ```
 
+### 5c. Run the smaller speculative fast profile
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_speculative_v1_fast.yaml
+```
+
+### 5d. Run the smaller speculative text profile
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_speculative_v1_text.yaml
+```
+
+### 5e. Run the nine-question v2 fast profile
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v2_fast.yaml
+```
+
+### 5f. Run the nine-question v2 full profile
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v2_full.yaml
+```
+
 When to use `fast` vs `full`:
 
 - Use `fast` for quick sweeps, prompt iteration, and profiling loops.
@@ -208,6 +233,15 @@ Typical plots include:
 - `mlx_reuse_saved_prefill_tokens_est`, `mlx_reuse_cache_prepare_s_total`, and `mlx_reuse_output_tokens_per_s_est`: whether MLX prompt-cache reuse is likely saving prefill work while decode remains the real bottleneck
 
 These metrics are most useful together. A run can have unstable answers but still show a very strong semantic attractor in rewind space.
+
+## Notes and Writing Trail
+
+If you want the project to read more like an unfolding study than a single script,
+start here:
+
+- [docs/general_reasoning_speculative_v1.md](./docs/general_reasoning_speculative_v1.md)
+- [docs/plot_field_guide.md](./docs/plot_field_guide.md)
+- [docs/roadmap.md](./docs/roadmap.md)
 
 ## Prompt Families
 

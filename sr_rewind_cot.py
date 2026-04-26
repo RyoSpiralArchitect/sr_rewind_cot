@@ -82,6 +82,11 @@ TRACE_OUTPUT_FORMATS = {"auto", "json", "text"}
 HF_BACKEND_CHOICES = {"auto", "torch", "mlx"}
 TRACE_ANSWER_LINE_RE = re.compile(r"^(?:final answer|answer|conclusion)\s*[:=-]\s*(.+)$", re.IGNORECASE)
 TRACE_STEP_PREFIX_RE = re.compile(r"^\s*(?:[-*•]+|\(?\d+\)?[.)]|step\s*\d+\s*[:.)-]?|[A-Za-z][.)])\s*", re.IGNORECASE)
+GENERATION_MARKER_RE = re.compile(r"<\|[^>]+\|>")
+JSONISH_STEP_TEXT_RE = re.compile(r'"(?:step|text|content|reasoning)"\s*:\s*"((?:\\.|[^"\\])*)"')
+SUMMARY_CUE_PATTERNS = [
+    re.compile(r"\b(?:therefore|thus|hence|in summary|overall|in other words|the key (?:point|difference)|the contrast is|this means)\b", re.IGNORECASE),
+]
 CONTENT_WORD_RE = re.compile(r"[A-Za-z0-9']+")
 COMMON_STOPWORDS = {
     "the", "and", "for", "that", "with", "this", "from", "into", "their", "there",
@@ -564,8 +569,28 @@ def strip_markdown_code_fence(text: str) -> str:
         lines = lines[:-1]
     return "\n".join(lines).strip()
 
+def strip_generation_markers(text: str) -> str:
+    return GENERATION_MARKER_RE.sub("", str(text or "")).strip()
+
+def extract_step_text_from_jsonish_string(text: str) -> Tuple[str, Dict[str, Any]]:
+    raw = strip_generation_markers(text).strip().rstrip(",")
+    obj = extract_first_json_object(raw)
+    if isinstance(obj, dict):
+        for key in ("step", "text", "content", "reasoning"):
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip():
+                record = {
+                    "id": int(obj.get("id", 0)) if str(obj.get("id", "")).isdigit() else None,
+                    "type": str(obj.get("type") or obj.get("kind") or "").strip() or None,
+                }
+                return value.strip(), {k: v for k, v in record.items() if v is not None}
+    m = JSONISH_STEP_TEXT_RE.search(raw)
+    if m is not None:
+        return decode_jsonish_string(m.group(1)).strip(), {}
+    return "", {}
+
 def clean_trace_line(line: str) -> str:
-    s = str(line or "").strip()
+    s = strip_generation_markers(line).strip()
     if not s:
         return ""
     s = TRACE_STEP_PREFIX_RE.sub("", s).strip()
@@ -582,6 +607,7 @@ def extract_trace_payload_from_plaintext(text: str) -> Optional[Dict[str, Any]]:
 
     lines: List[str] = []
     answer = ""
+    answer_started = False
     for raw_line in raw.splitlines():
         s = raw_line.strip()
         if not s:
@@ -593,6 +619,12 @@ def extract_trace_payload_from_plaintext(text: str) -> Optional[Dict[str, Any]]:
         m = TRACE_ANSWER_LINE_RE.match(s)
         if m is not None:
             answer = clean_trace_line(m.group(1))
+            answer_started = True
+            continue
+        if answer_started:
+            continuation = clean_trace_line(s)
+            if continuation and not TRACE_STEP_PREFIX_RE.match(s):
+                answer = f"{answer} {continuation}".strip()
             continue
         cleaned = clean_trace_line(s)
         if not cleaned:
@@ -631,8 +663,11 @@ def normalize_trace_step_records(raw_steps: Any) -> List[Dict[str, Any]]:
         text = ""
         record: Dict[str, Any] = {}
         if isinstance(item, str):
-            text = item
+            text, parsed_record = extract_step_text_from_jsonish_string(item)
+            if not text:
+                text = item
             record = {"id": idx, "type": "step"}
+            record.update(parsed_record)
         elif isinstance(item, dict):
             record = dict(item)
             for key in ("step", "text", "content", "reasoning"):
@@ -678,7 +713,7 @@ def trace_from_payload(payload: Dict[str, Any]) -> "Trace":
     step_records = normalize_trace_step_records(raw_steps)
     return Trace(
         steps=[record["text"] for record in step_records],
-        answer=str(payload.get("answer", "")),
+        answer=sanitize_trace_answer(str(payload.get("answer", "")), step_records=step_records),
         step_records=step_records,
         metadata=(dict(payload.get("metadata")) if isinstance(payload.get("metadata"), dict) else None),
     )
@@ -689,6 +724,31 @@ def extract_trace_answer(obj: Dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return str(obj.get("answer", "")).strip()
+
+def sanitize_trace_answer(answer: str, step_records: Optional[List[Dict[str, Any]]] = None) -> str:
+    raw = strip_generation_markers(strip_markdown_code_fence(answer or "")).strip()
+    if not raw:
+        return ""
+    m = TRACE_ANSWER_LINE_RE.match(raw)
+    if m is not None:
+        raw = clean_trace_line(m.group(1))
+    obj = extract_first_json_object(raw)
+    if isinstance(obj, dict):
+        nested_answer = extract_trace_answer(obj)
+        if nested_answer:
+            raw = strip_generation_markers(nested_answer).strip()
+        else:
+            nested_step, _ = extract_step_text_from_jsonish_string(raw)
+            if nested_step:
+                return ""
+    elif JSONISH_STEP_TEXT_RE.search(raw):
+        return ""
+    raw = clean_trace_line(raw)
+    if step_records:
+        answer_norm = normalize_answer(raw)
+        if answer_norm and any(normalize_answer(str(rec.get("text", ""))) == answer_norm for rec in step_records):
+            return ""
+    return raw
 
 def mean_or_none(xs: List[float]) -> Optional[float]:
     return (sum(xs) / len(xs)) if xs else None
@@ -1032,9 +1092,309 @@ def summarize_rewind_novelty(rows: List[Dict[str, Any]], *, threshold: float) ->
         "novelty_threshold": threshold,
     }
 
+def extract_rewind_core_candidate(rewind_trace: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(rewind_trace, dict):
+        return None
+    novelty_rows = list(rewind_trace.get("novelty_curve") or [])
+    score_rows = {
+        int(row.get("depth", 0) or 0): dict(row)
+        for row in (rewind_trace.get("process_reward_step_scores") or [])
+        if isinstance(row, dict)
+    }
+    step_rows = {
+        int(row.get("depth", 0) or 0): dict(row)
+        for row in (rewind_trace.get("step_records") or [])
+        if isinstance(row, dict)
+    }
+    fixed_depth = rewind_trace.get("fixed_point_depth")
+    candidate_row: Optional[Dict[str, Any]] = None
+    source = "attractor"
+    if fixed_depth is not None:
+        depth = int(fixed_depth or 0)
+        for row in novelty_rows:
+            if int(row.get("depth", 0) or 0) == depth:
+                candidate_row = dict(row)
+                source = "fixed_point"
+                break
+    if candidate_row is None and novelty_rows:
+        candidate_pool = [
+            row for row in novelty_rows
+            if int(row.get("depth", 0) or 0) >= 2
+        ] or novelty_rows
+        def _candidate_rank(row: Dict[str, Any]) -> Tuple[float, float, float]:
+            depth = int(row.get("depth", 0) or 0)
+            score = float((score_rows.get(depth) or {}).get("score", 0.0) or 0.0)
+            return (
+                float(row.get("max_similarity_to_previous", 0.0) or 0.0),
+                score,
+                -float(row.get("novelty", 0.0) or 0.0),
+            )
+        candidate_row = max(candidate_pool, key=_candidate_rank)
+    if candidate_row is None:
+        return None
+    depth = int(candidate_row.get("depth", 0) or 0)
+    step_text = str(candidate_row.get("step") or (step_rows.get(depth) or {}).get("step") or "").strip()
+    if not step_text:
+        return None
+    score_row = score_rows.get(depth) or {}
+    return {
+        "text": step_text,
+        "depth": depth,
+        "source": source,
+        "max_similarity_to_previous": float(candidate_row.get("max_similarity_to_previous", 0.0) or 0.0),
+        "novelty": float(candidate_row.get("novelty", 0.0) or 0.0),
+        "process_reward_score": float(score_row.get("score", 0.0) or 0.0),
+    }
+
+def looks_like_parser_artifact(text: str) -> bool:
+    s = strip_generation_markers(text).strip()
+    if not s:
+        return False
+    if JSONISH_STEP_TEXT_RE.search(s):
+        return True
+    if s.startswith("{") or s.startswith("["):
+        return True
+    if any(token in s for token in ['"id":', '"type":', '"text":', '"step":', "<|eot_id|>"]):
+        return True
+    return False
+
+def looks_like_summary_fixed_point(text: str) -> bool:
+    s = normalize_answer(text)
+    if not s:
+        return False
+    return any(p.search(s) for p in SUMMARY_CUE_PATTERNS)
+
+def classify_rewind_fixed_point_type(
+    candidate: Optional[Dict[str, Any]],
+    rewind_trace: Dict[str, Any],
+    rewind_curve: Dict[str, Any],
+    *,
+    trace_answer: str = "",
+    baseline_answer: str = "",
+) -> Optional[str]:
+    if not candidate or not candidate.get("text"):
+        return None
+    text = str(candidate.get("text") or "").strip()
+    if not text:
+        return None
+    if looks_like_parser_artifact(text):
+        return "parser_fixed_point"
+
+    answer_targets = [
+        trace_answer,
+        baseline_answer,
+        *((row.get("top_answer") or "") for row in ((rewind_curve or {}).get("curve") or [])),
+    ]
+    answer_sims = [
+        step_semantic_similarity(text, target)
+        for target in answer_targets
+        if str(target or "").strip()
+    ]
+    max_answer_sim = max(answer_sims) if answer_sims else 0.0
+    if max_answer_sim >= 0.92:
+        return "answer_leak_fixed_point"
+
+    fixed_depth = rewind_trace.get("fixed_point_depth")
+    if fixed_depth is None:
+        return "no_fixed_point"
+    if looks_like_summary_fixed_point(text):
+        return "summary_fixed_point"
+    return "core_fixed_point"
+
+def build_answer_from_explicit_trace_prompt(question: str, steps: List[str]) -> str:
+    steps_block = "\n".join(f"- {str(step).strip()}" for step in steps if str(step).strip()) or "(no reasoning steps)"
+    return (
+        f"Problem:\n{question}\n\n"
+        f"Candidate reasoning trace:\n{steps_block}\n\n"
+        "Give ONLY the final answer.\n"
+        "No explanation.\n"
+        "No extra text."
+    ).strip()
+
+def build_candidate_core_variants(text: str, *, max_variants: int = 3) -> List[str]:
+    base = strip_generation_markers(text).strip()
+    if not base:
+        return []
+    variants: List[str] = []
+    seen = set()
+
+    def _add(value: str) -> None:
+        cleaned = " ".join(strip_generation_markers(value).split()).strip().strip(".")
+        norm = normalize_answer(cleaned)
+        if cleaned and norm and norm not in seen and normalize_answer(base) != norm:
+            seen.add(norm)
+            variants.append(cleaned)
+
+    replace_maps = [
+        {" because ": " since ", " therefore ": " so ", " thus ": " so "},
+        {" difference ": " distinction ", " differences ": " distinctions ", " norm ": " rule ", " norms ": " rules "},
+        {" justification ": " reason ", " justifies ": " supports ", " justified ": " supported "},
+    ]
+    for mapping in replace_maps:
+        v = f" {base} "
+        for src, dst in mapping.items():
+            v = v.replace(src, dst)
+        _add(v.strip())
+    _add(base.replace(",", ""))
+    _add(f"In other words, {base[0].lower() + base[1:]}" if len(base) > 1 else base)
+    return variants[:max_variants]
+
+def evaluate_explicit_trace_answer_match(
+    backend: Backend,
+    question: str,
+    steps: List[str],
+    *,
+    target_answer: str,
+    settings: "ExperimentSettings",
+    run_seed: int,
+    n_samples: int,
+) -> Dict[str, Any]:
+    prompt = build_answer_from_explicit_trace_prompt(question, steps)
+    seeds = [run_seed + i for i in range(max(1, n_samples))]
+    with temporary_backend_generation_overrides(
+        backend,
+        max_new_tokens=settings.core_certificate_max_new_tokens,
+    ):
+        answers = generate_many_outputs(backend, prompt, temperature=settings.temperature_reanswer, seeds=seeds)
+    dist = dist_from_answers(answers)
+    target_norm = normalize_answer(target_answer)
+    match_rate = dist.get(target_norm, 0) / max(1, len(answers)) if target_norm else 0.0
+    top_answer = dist.most_common(1)[0][0] if dist else ""
+    return {
+        "match_rate": match_rate,
+        "top_answer": top_answer,
+        "answers": answers,
+    }
+
+def compute_core_certificate_lite(
+    backend: Backend,
+    question: str,
+    trace: "Trace",
+    rewind_trace: Dict[str, Any],
+    rewind_curve: Dict[str, Any],
+    baseline_answer: str,
+    settings: "ExperimentSettings",
+    run_seed: int,
+    *,
+    forward_result: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    candidate = extract_rewind_core_candidate(rewind_trace)
+    if not candidate or not candidate.get("text") or not normalize_answer(baseline_answer):
+        return {
+            "core_certificate_mode": str(settings.core_certificate_mode or "off"),
+            "core_candidate_text": (candidate or {}).get("text") if isinstance(candidate, dict) else None,
+            "core_candidate_depth": (candidate or {}).get("depth") if isinstance(candidate, dict) else None,
+            "core_candidate_source": (candidate or {}).get("source") if isinstance(candidate, dict) else None,
+            "core_candidate_forward_index": None,
+            "core_candidate_forward_similarity": None,
+            "core_certificate_necessity": None,
+            "core_certificate_sufficiency": None,
+            "core_certificate_stability": None,
+            "core_certificate_bidirectional_attractor": None,
+            "core_certificate_minimality": None,
+            "core_certificate_score": None,
+        }
+
+    full_steps = [str(s).strip() for s in trace.steps[: settings.max_steps] if str(s).strip()]
+    candidate_text = str(candidate.get("text") or "").strip()
+    similarities = [step_semantic_similarity(candidate_text, step) for step in full_steps]
+    forward_idx = max(range(len(full_steps)), key=lambda i: similarities[i]) if similarities else None
+    forward_sim = similarities[forward_idx] if forward_idx is not None else 0.0
+
+    full_acc = None
+    if isinstance(forward_result, dict):
+        curve_rows = forward_result.get("curve") or []
+        if curve_rows:
+            try:
+                full_acc = float(curve_rows[-1].get("match_rate", 0.0) or 0.0)
+            except Exception:
+                full_acc = None
+    if full_acc is None:
+        full_eval = evaluate_explicit_trace_answer_match(
+            backend,
+            question,
+            full_steps,
+            target_answer=baseline_answer,
+            settings=settings,
+            run_seed=run_seed + 10_000,
+            n_samples=settings.core_certificate_samples,
+        )
+        full_acc = float(full_eval.get("match_rate", 0.0) or 0.0)
+
+    ablated_steps = list(full_steps)
+    if forward_idx is not None and 0 <= forward_idx < len(ablated_steps):
+        del ablated_steps[forward_idx]
+    necessity_eval = evaluate_explicit_trace_answer_match(
+        backend,
+        question,
+        ablated_steps,
+        target_answer=baseline_answer,
+        settings=settings,
+        run_seed=run_seed + 20_000,
+        n_samples=settings.core_certificate_samples,
+    )
+    sufficiency_eval = evaluate_explicit_trace_answer_match(
+        backend,
+        question,
+        [candidate_text],
+        target_answer=baseline_answer,
+        settings=settings,
+        run_seed=run_seed + 30_000,
+        n_samples=settings.core_certificate_samples,
+    )
+    variant_scores: List[float] = []
+    for i, variant in enumerate(build_candidate_core_variants(candidate_text, max_variants=settings.core_certificate_paraphrases)):
+        variant_eval = evaluate_explicit_trace_answer_match(
+            backend,
+            question,
+            [variant],
+            target_answer=baseline_answer,
+            settings=settings,
+            run_seed=run_seed + 40_000 + i * 1_000,
+            n_samples=max(1, settings.core_certificate_samples - 1),
+        )
+        variant_scores.append(float(variant_eval.get("match_rate", 0.0) or 0.0))
+
+    forward_reachability = max(similarities) if similarities else 0.0
+    rewind_steps = [str(s).strip() for s in (rewind_trace.get("forward_order") or list(reversed(rewind_trace.get("latest_to_earlier") or []))) if str(s).strip()]
+    rewind_reachability = max((step_semantic_similarity(candidate_text, step) for step in rewind_steps), default=0.0)
+    candidate_word_count = len(CONTENT_WORD_RE.findall(candidate_text))
+    trace_word_count = sum(len(CONTENT_WORD_RE.findall(step)) for step in full_steps)
+    minimality = 1.0 - (float(candidate_word_count) / float(max(1, trace_word_count)))
+
+    necessity = clamp01(float(full_acc or 0.0) - float(necessity_eval.get("match_rate", 0.0) or 0.0))
+    sufficiency = clamp01(float(sufficiency_eval.get("match_rate", 0.0) or 0.0))
+    stability = clamp01(mean_or_none(variant_scores) if variant_scores else sufficiency)
+    bidirectional_attractor = clamp01((forward_reachability + rewind_reachability) / 2.0)
+    minimality = clamp01(minimality)
+    factors = [necessity, sufficiency, stability, bidirectional_attractor, minimality]
+    score = 0.0
+    if factors:
+        safe = [max(1.0e-6, float(x)) for x in factors]
+        score = float(math.prod(safe) ** (1.0 / len(safe)))
+
+    return {
+        "core_certificate_mode": "lite",
+        "core_candidate_text": candidate_text,
+        "core_candidate_depth": candidate.get("depth"),
+        "core_candidate_source": candidate.get("source"),
+        "core_candidate_forward_index": forward_idx,
+        "core_candidate_forward_similarity": forward_sim,
+        "core_certificate_necessity": necessity,
+        "core_certificate_sufficiency": sufficiency,
+        "core_certificate_stability": stability,
+        "core_certificate_bidirectional_attractor": bidirectional_attractor,
+        "core_certificate_minimality": minimality,
+        "core_certificate_score": score,
+    }
+
 def compute_rewind_core_metrics(
     rewind_trace: Dict[str, Any],
     rewind_curve: Dict[str, Any],
+    *,
+    trace: Optional["Trace"] = None,
+    baseline_answer: str = "",
+    core_certificate: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     fixed_point_depth = rewind_trace.get("fixed_point_depth")
     recurrence = float(rewind_trace.get("fixed_point_recurrence_rate", 0.0) or 0.0)
@@ -1052,13 +1412,28 @@ def compute_rewind_core_metrics(
         _, count = Counter(tail_answers).most_common(1)[0]
         answer_reproduction = count / max(1, len(tail_answers))
     core_strength = loop_closure * answer_reproduction * recurrence * non_redundancy
-    return {
+    candidate = extract_rewind_core_candidate(rewind_trace)
+    fixed_point_type = classify_rewind_fixed_point_type(
+        candidate,
+        rewind_trace,
+        rewind_curve,
+        trace_answer=(trace.answer if isinstance(trace, Trace) else ""),
+        baseline_answer=baseline_answer,
+    )
+    out = {
         "fixed_point_depth": fixed_point_depth,
+        "fixed_point_type": fixed_point_type,
         "answer_reproduction_rate": answer_reproduction,
         "fixed_point_recurrence_rate": recurrence,
         "pre_fixed_novelty_mean": non_redundancy,
         "core_strength": core_strength,
+        "core_candidate_text": (candidate.get("text") if isinstance(candidate, dict) else None),
+        "core_candidate_depth": (candidate.get("depth") if isinstance(candidate, dict) else None),
+        "core_candidate_source": (candidate.get("source") if isinstance(candidate, dict) else None),
     }
+    if isinstance(core_certificate, dict):
+        out.update(core_certificate)
+    return out
 
 def summarize_rewind_alignment(
     original_latest_to_earlier: List[str],
@@ -2629,6 +3004,10 @@ class ExperimentSettings:
     rewind_escape_temperature: float = 0.6
     rewind_step_top_p: float = 0.9
     rewind_step_repetition_penalty: float = 1.05
+    core_certificate_mode: str = "off"  # off|lite
+    core_certificate_samples: int = 3
+    core_certificate_paraphrases: int = 3
+    core_certificate_max_new_tokens: int = 48
 
     # bridge-CoT extras
     enable_bridge: bool = True
@@ -2687,7 +3066,7 @@ def parse_trace_output(question: str, raw: str) -> Trace:
         )
     step_records = normalize_trace_step_records(obj.get("steps", []))
     steps = [record["text"] for record in step_records]
-    answer = extract_trace_answer(obj)
+    answer = sanitize_trace_answer(extract_trace_answer(obj), step_records=step_records)
     if not steps:
         raise RuntimeError("Trace output had no usable steps.")
     return Trace(steps=steps, answer=answer, step_records=step_records)
@@ -5887,6 +6266,10 @@ experiment:
   rewind_escape_temperature: 0.6
   rewind_step_top_p: 0.9
   rewind_step_repetition_penalty: 1.05
+  core_certificate_mode: off      # off | lite
+  core_certificate_samples: 3
+  core_certificate_paraphrases: 3
+  core_certificate_max_new_tokens: 48
 
   # Bridge-CoT extras
   enable_bridge: true
@@ -5967,6 +6350,10 @@ def add_common_curve_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--rewind-escape-temp", type=float, default=0.6)
     p.add_argument("--rewind-step-top-p", type=float, default=0.9)
     p.add_argument("--rewind-step-repetition-penalty", type=float, default=1.05)
+    p.add_argument("--core-certificate-mode", default="off", choices=["off", "lite"], help="Optional intervention-based core certificate pass on rewind core candidates.")
+    p.add_argument("--core-certificate-samples", type=int, default=3, help="Samples per intervention prompt when computing the lite core certificate.")
+    p.add_argument("--core-certificate-paraphrases", type=int, default=3, help="Number of deterministic paraphrase/noise variants to test in the lite core certificate.")
+    p.add_argument("--core-certificate-max-new-tokens", type=int, default=48, help="Max new tokens for certificate-side answer decoding.")
 
     # bridge-CoT extras
     p.add_argument("--no-bridge", action="store_true", help="Disable bridge-side prefix+rewind combined evaluation.")

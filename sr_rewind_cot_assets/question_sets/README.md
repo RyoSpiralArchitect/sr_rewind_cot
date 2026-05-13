@@ -22,10 +22,9 @@ Current files:
   - forward/rewind asymmetry
 
 - `general_reasoning_observation_v1_text.yaml`
-  Text-mode sibling of the main observation batch. It keeps the same six questions
-  and nearly the same settings, but switches `trace_format` to `text` and gives
-  the backend a slightly larger generation budget so open-ended traces are less
-  likely to truncate mid-answer.
+  Text-mode sibling of the fast observation batch. It keeps the same six questions,
+  switches `trace_format` to `text`, and uses the same shorter rewind answer budget
+  plus pyramid tail/oracle sampling as the fast JSON profile.
 
 - `general_reasoning_speculative_v1_fast.yaml`
   A smaller fast profile built around three more speculative general-reasoning prompts.
@@ -92,3 +91,13 @@ python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general
 ```
 
 You will usually want to edit the backend block first so it matches your local model path or API endpoint.
+
+Text-mode notes:
+
+- Use text profiles when JSON traces are producing schema fragments or when an
+  open-ended question is easier to read as plain steps.
+- Local MLX probes showed clean plain-text traces with no old
+  `StepGenerationResponse(...)` wrapper leakage.
+- Exact string metrics can look pessimistic on text profiles because semantically
+  close explanations often differ by wording. Inspect raw generations and
+  trace-vs-rewind fields before treating `auc_match=0.0` as total failure.

@@ -162,25 +162,31 @@ python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v1_full.yaml
 ```
 
-### 5c. Run the smaller speculative fast profile
+### 5c. Run the text-mode observation profile
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v1_text.yaml
+```
+
+### 5d. Run the smaller speculative fast profile
 
 ```bash
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_speculative_v1_fast.yaml
 ```
 
-### 5d. Run the smaller speculative text profile
+### 5e. Run the smaller speculative text profile
 
 ```bash
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_speculative_v1_text.yaml
 ```
 
-### 5e. Run the nine-question v2 fast profile
+### 5f. Run the nine-question v2 fast profile
 
 ```bash
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v2_fast.yaml
 ```
 
-### 5f. Run the nine-question v2 full profile
+### 5g. Run the nine-question v2 full profile
 
 ```bash
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v2_full.yaml
@@ -190,6 +196,7 @@ When to use `fast` vs `full`:
 
 - Use `fast` for quick sweeps, prompt iteration, and profiling loops.
 - Use `full` for slower, more conservative rewind comparisons when you want to inspect the results closely.
+- Use `text` when the reasoning content looks good but JSON formatting artifacts are getting in the way.
 - Actual runtime can still vary a lot with trace length and question behavior, so compare both on the same batch when in doubt.
 
 ### 6. Inspect or compare metrics without rerunning the experiment

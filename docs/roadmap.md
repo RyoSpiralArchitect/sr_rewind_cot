@@ -49,6 +49,9 @@ Operational signs:
 Next improvements that would help a paper:
 
 - paired `json` vs `text` runs for the same speculative prompts
+- paired `json` vs `text` runs for the six-question observation batch using
+  `general_reasoning_observation_v1_fast.yaml` and
+  `general_reasoning_observation_v1_text.yaml`
 - fixed random seeds and repeated runs per question family
 - small curated benchmark subsets for each failure mode
 - run manifests that explicitly record which profile was used and why

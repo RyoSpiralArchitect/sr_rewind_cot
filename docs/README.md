@@ -10,6 +10,10 @@ Current notes:
   Why the three speculative questions were added, what each one probes, and what
   the early runs seem to reveal.
 
+- [general_reasoning_text_mode.md](./general_reasoning_text_mode.md)
+  Practical notes from text-trace probes: when text helps, what it fixes, and
+  why exact-match metrics can be misleading for open-ended explanations.
+
 - [plot_field_guide.md](./plot_field_guide.md)
   A compact guide for reading the most useful plot families and deciding whether a
   run shows structural preservation, semantic drift, or core collapse.

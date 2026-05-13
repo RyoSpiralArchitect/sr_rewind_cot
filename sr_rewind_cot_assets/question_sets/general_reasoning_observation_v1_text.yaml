@@ -1,5 +1,7 @@
-# Text-mode sibling of general_reasoning_observation_v1.yaml.
+# Text-mode sibling of general_reasoning_observation_v1_fast.yaml.
 # Keeps the same question batch so json vs text traces stay easy to compare.
+# Uses the fast rewind budget because open-ended text traces otherwise spend a
+# lot of time decoding semantically similar tail answers.
 
 api:
   timeout_s: 180
@@ -50,6 +52,9 @@ experiment:
   enable_rewind: true
   rewind_step_temperature: 0.5
   rewind_samples_per_depth: 5
+  rewind_answer_max_new_tokens: 48
+  rewind_sample_schedule: "pyramid"
+  rewind_sample_min_per_depth: 3
   rewind_order: "reverse"
   compute_oracle_tail: true
   rewind_process_reward_mode: "lite"

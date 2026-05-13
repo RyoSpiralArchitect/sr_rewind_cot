@@ -136,6 +136,8 @@ class TestNamingAndPromptAssets(unittest.TestCase):
         questions = cfg.get("questions") or []
         self.assertEqual(experiment.get("trace_format"), "text")
         self.assertEqual(experiment.get("prompt_family"), "general_reasoning")
+        self.assertEqual(experiment.get("rewind_sample_schedule"), "pyramid")
+        self.assertEqual(experiment.get("rewind_answer_max_new_tokens"), 48)
         self.assertEqual(len(questions), 6)
         self.assertIn("binary search", questions[0]["question"].lower())
 
@@ -196,6 +198,7 @@ class TestNamingAndPromptAssets(unittest.TestCase):
     def test_docs_exist(self) -> None:
         base = Path(spbc.SCRIPT_DIR) / "docs"
         self.assertTrue((base / "README.md").exists())
+        self.assertTrue((base / "general_reasoning_text_mode.md").exists())
         self.assertTrue((base / "general_reasoning_speculative_v1.md").exists())
         self.assertTrue((base / "plot_field_guide.md").exists())
         self.assertTrue((base / "roadmap.md").exists())

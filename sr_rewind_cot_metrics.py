@@ -130,6 +130,7 @@ def summarize_runtime_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
         "time_rewind_trace_s": (rewind_timings.get("rewind_trace_s") if isinstance(rewind_timings, dict) else None),
         "time_rewind_curve_s": (rewind_timings.get("rewind_curve_s") if isinstance(rewind_timings, dict) else None),
         "time_oracle_tail_curve_s": (rewind_timings.get("oracle_tail_curve_s") if isinstance(rewind_timings, dict) else None),
+        "time_step_influence_s": (stage.get("step_influence_s") if isinstance(stage, dict) else None),
         "time_bridge_total_s": (stage.get("bridge_total_s") if isinstance(stage, dict) else None),
         "time_permutation_tests_s": (stage.get("permutation_tests_s") if isinstance(stage, dict) else None),
         "time_total_s": (stage.get("total_s") if isinstance(stage, dict) else None),
@@ -255,6 +256,43 @@ def summarize_trace_axes_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def summarize_semantic_answer_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+    rewind_curve = res.get("rewind_curve") or {}
+    oracle_curve = res.get("oracle_tail_curve") or {}
+    return {
+        "semantic_match_threshold": res.get("semantic_match_threshold"),
+        "auc_semantic_match": res.get("auc_semantic_match"),
+        "auc_semantic_similarity": res.get("auc_semantic_similarity"),
+        "rewind_auc_semantic_match": (rewind_curve.get("auc_semantic_match") if isinstance(rewind_curve, dict) else None),
+        "rewind_auc_semantic_similarity": (rewind_curve.get("auc_semantic_similarity") if isinstance(rewind_curve, dict) else None),
+        "oracle_tail_auc_semantic_match": (oracle_curve.get("auc_semantic_match") if isinstance(oracle_curve, dict) else None),
+        "oracle_tail_auc_semantic_similarity": (oracle_curve.get("auc_semantic_similarity") if isinstance(oracle_curve, dict) else None),
+    }
+
+
+def summarize_step_influence_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+    comp = res.get("step_influence") or {}
+    if not isinstance(comp, dict):
+        comp = {}
+    full_eval = comp.get("full_eval") or {}
+    if not isinstance(full_eval, dict):
+        full_eval = {}
+    return {
+        "step_influence_mode": comp.get("mode"),
+        "step_influence_enabled": comp.get("enabled"),
+        "step_influence_step_count": comp.get("step_count"),
+        "step_influence_sample_count": comp.get("sample_count"),
+        "step_influence_full_match_rate": full_eval.get("match_rate"),
+        "step_influence_full_semantic_match_rate": full_eval.get("semantic_match_rate"),
+        "step_influence_full_semantic_similarity_mean": full_eval.get("semantic_similarity_mean"),
+        "step_influence_max_necessity_step": comp.get("max_necessity_step_index"),
+        "step_influence_max_necessity_semantic_similarity": comp.get("max_necessity_semantic_similarity"),
+        "step_influence_max_sufficiency_step": comp.get("max_sufficiency_step_index"),
+        "step_influence_max_sufficiency_semantic_similarity": comp.get("max_sufficiency_semantic_similarity"),
+        "step_influence_mean_recovered_substitution_delta_semantic_similarity": comp.get("mean_recovered_substitution_delta_semantic_similarity"),
+    }
+
+
 def to_csv(rows: List[Dict[str, Any]]) -> str:
     if not rows:
         return ""
@@ -279,9 +317,12 @@ DEFAULT_SHOW_FIELDS = [
     "L",
     "time_total_s",
     "time_rewind_total_s",
+    "time_step_influence_s",
     "time_rewind_curve_s",
     "time_oracle_tail_curve_s",
     "rewind_total_generation_calls",
+    "auc_semantic_similarity",
+    "step_influence_max_necessity_semantic_similarity",
     "mlx_reuse_saved_prefill_tokens_est",
     "mlx_reuse_saved_prefill_ratio_est",
     "mlx_reuse_cache_prepare_s_total",

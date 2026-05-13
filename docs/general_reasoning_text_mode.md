@@ -38,6 +38,8 @@ For text-mode runs, inspect these fields together:
 - `baseline_raw_answers`
 - `forward_raw_answers_by_k`
 - `rewind_trace.raw_recoveries`
+- `auc_semantic_similarity`
+- `step_influence.rows`
 - `trace_vs_rewind_preservation_rate`
 - `rewind_loop_closure_mean`
 

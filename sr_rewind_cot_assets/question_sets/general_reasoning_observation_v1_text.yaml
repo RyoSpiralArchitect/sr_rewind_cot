@@ -45,6 +45,11 @@ experiment:
 
   compute_divergence: true
   divergence_alpha: 1.0e-6
+  semantic_match_threshold: 0.72
+
+  step_influence_mode: "lite"
+  step_influence_samples: 2
+  step_influence_max_new_tokens: 48
 
   permutation_tests: 0
   permutation_seed: 1234

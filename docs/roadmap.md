@@ -14,6 +14,8 @@ Current status:
 
 - mostly in place
 - metrics can now be compared run-to-run with `sr_rewind_cot_metrics.py`
+- lightweight semantic answer preservation and step influence are now available
+  beside exact match
 
 ## Phase 2. Task Taxonomy
 
@@ -41,6 +43,8 @@ Operational signs:
 
 - `trace_vs_rewind_preservation_rate`
 - `rewind_axis_base_prm_preservation_rate`
+- `step_influence_max_necessity_semantic_similarity`
+- `step_influence_mean_recovered_substitution_delta_semantic_similarity`
 - `rewind_curve.raw_answers_by_depth`
 - `__rewind_novelty.png`
 

@@ -101,3 +101,6 @@ Text-mode notes:
 - Exact string metrics can look pessimistic on text profiles because semantically
   close explanations often differ by wording. Inspect raw generations and
   trace-vs-rewind fields before treating `auc_match=0.0` as total failure.
+- Fast and text profiles enable `step_influence_mode: "lite"` so the same fixed
+  question sets can be read through leave-one-out, single-step, and rewind-step
+  substitution probes.

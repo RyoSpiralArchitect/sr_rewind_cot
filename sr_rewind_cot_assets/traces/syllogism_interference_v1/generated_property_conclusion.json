@@ -1,0 +1,8 @@
+{
+  "answer": "Therefore, no dax can be a mip.",
+  "steps": [
+    "All dax are wugs.",
+    "No wugs are mips.",
+    "Since being a mip is not a property of any wug, it is not possible for a dax to be a mip."
+  ]
+}

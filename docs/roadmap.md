@@ -14,6 +14,8 @@ Current status:
 
 - mostly in place
 - metrics can now be compared run-to-run with `sr_rewind_cot_metrics.py`
+- lightweight semantic answer preservation and step influence are now available
+  beside exact match
 
 ## Phase 2. Task Taxonomy
 
@@ -28,6 +30,8 @@ Current status:
 - `general_reasoning_observation_v1_*`: explanatory / causal / comparison tasks
 - `general_reasoning_speculative_v1_*`: open-ended conceptual and normative tasks
 - `general_reasoning_observation_v2_*`: combined batch for broader sweeps
+- `closed_answer_reasoning_v1_text_micro.yaml`: small closed-answer logic pilot
+  for named wrong-answer basins and step-influence readouts
 
 ## Phase 3. Rewind Phenomenology
 
@@ -41,6 +45,8 @@ Operational signs:
 
 - `trace_vs_rewind_preservation_rate`
 - `rewind_axis_base_prm_preservation_rate`
+- `step_influence_max_necessity_semantic_similarity`
+- `step_influence_mean_recovered_substitution_delta_semantic_similarity`
 - `rewind_curve.raw_answers_by_depth`
 - `__rewind_novelty.png`
 
@@ -49,9 +55,14 @@ Operational signs:
 Next improvements that would help a paper:
 
 - paired `json` vs `text` runs for the same speculative prompts
+- paired `json` vs `text` runs for the six-question observation batch using
+  `general_reasoning_observation_v1_fast.yaml` and
+  `general_reasoning_observation_v1_text.yaml`
 - fixed random seeds and repeated runs per question family
 - small curated benchmark subsets for each failure mode
 - run manifests that explicitly record which profile was used and why
+- closed-answer micro sweeps before larger batches, so exact-match behavior is
+  calibrated against tasks where answer surfaces are intentionally constrained
 
 ## Phase 5. Stronger Process Models
 
@@ -78,3 +89,24 @@ A plausible paper arc could be:
 The main goal is not to prove rewind "works" in a single sense. The stronger and
 more interesting claim is likely about the shapes of failure, compression, and
 surviving structure.
+
+## Phase 7. Conference-Facing Probe
+
+The current strongest wedge is the closed-answer syllogism interference probe:
+
+- direct premise wording keeps the answer stable;
+- class/subset wording can create a deterministic wrong-answer basin at an
+  intermediate prefix;
+- an explicit compatible conclusion can repair that basin;
+- rewind-like converse errors create high-entropy answer regions under sampling.
+
+This points toward a focused workshop or short-paper story: use rewind and prefix
+interventions not as solvers, but as instruments for locating answer-space phase
+transitions inside generated reasoning traces.
+
+Before scaling, prioritize controlled replications over large benchmark breadth:
+
+- vary nonce words and surface wording;
+- repeat across multiple local or hosted models;
+- keep fixed-trace variants so runs are comparable;
+- report both greedy and sampled re-answer distributions.

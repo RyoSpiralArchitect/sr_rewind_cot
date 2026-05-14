@@ -45,7 +45,7 @@ This makes it useful for experiments about:
 - Compute forward stability curves, entropy, divergence, rewind novelty, fixed-point depth, and core-strength style metrics.
 - Compare `base` vs `PRM-selected` traces on both the forward and rewind side, including a dedicated `base rewind` vs `PRM rewind` axis.
 - Record stage timings and rewind workload counts so bottlenecks can be read directly from `summary.csv`.
-- Plot forward, rewind, bridge, trace-vs-rewind similarity, rewind novelty, rewind axes, and base-vs-PRM-vs-rewind comparisons.
+- Plot forward, rewind, bridge, trace-vs-rewind similarity, rewind novelty, rewind axes, step influence, and base-vs-PRM-vs-rewind comparisons.
 
 ## Research Framing
 
@@ -162,34 +162,49 @@ python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v1_full.yaml
 ```
 
-### 5c. Run the smaller speculative fast profile
+### 5c. Run the text-mode observation profile
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v1_text.yaml
+```
+
+### 5d. Run the smaller speculative fast profile
 
 ```bash
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_speculative_v1_fast.yaml
 ```
 
-### 5d. Run the smaller speculative text profile
+### 5e. Run the smaller speculative text profile
 
 ```bash
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_speculative_v1_text.yaml
 ```
 
-### 5e. Run the nine-question v2 fast profile
+### 5f. Run the nine-question v2 fast profile
 
 ```bash
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v2_fast.yaml
 ```
 
-### 5f. Run the nine-question v2 full profile
+### 5g. Run the nine-question v2 full profile
 
 ```bash
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v2_full.yaml
+```
+
+### 5h. Run the closed-answer reasoning micro profile
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/closed_answer_reasoning_v1_text_micro.yaml
 ```
 
 When to use `fast` vs `full`:
 
 - Use `fast` for quick sweeps, prompt iteration, and profiling loops.
 - Use `full` for slower, more conservative rewind comparisons when you want to inspect the results closely.
+- Use `text` when the reasoning content looks good but JSON formatting artifacts are getting in the way.
+- Use `closed-answer micro` when you want exact answer transitions and
+  wrong-answer basins to be visible without fighting open-ended paraphrase.
 - Actual runtime can still vary a lot with trace length and question behavior, so compare both on the same batch when in doubt.
 
 ### 6. Inspect or compare metrics without rerunning the experiment
@@ -211,6 +226,7 @@ Common outputs include:
 - `<backend>__<qid>__trace_vs_rewind.jsonl`: pairwise forward-vs-rewind comparison rows
 - `<backend>__<qid>__trace_axes.jsonl`: forward `base / PRM / rewind` alignment rows
 - `<backend>__<qid>__rewind_axes.jsonl`: `base rewind` vs `PRM rewind` alignment rows
+- `<backend>__<qid>__step_influence.jsonl`: leave-one-out, single-step, and rewind-substitution rows
 - `plots/`: generated figures
 
 Typical plots include:
@@ -218,6 +234,7 @@ Typical plots include:
 - forward prefix match-rate and entropy
 - rewind vs oracle-tail comparison
 - trace-vs-rewind similarity
+- step influence
 - rewind novelty and fixed-point depth
 - bridge heatmaps and core prototype plots
 
@@ -229,6 +246,9 @@ Typical plots include:
 - `rewind_core_strength`: a compact measure of how strongly rewind has collapsed into a recurring core
 - `trace_vs_rewind_preservation_rate`: how much of the forward trace survives rewind alignment
 - `rewind_axis_base_prm_preservation_rate`: how different the raw rewind path is from the PRM-guided rewind path
+- `auc_semantic_similarity`: average lightweight semantic similarity to the baseline answer across the forward prefix curve
+- `step_influence_max_necessity_semantic_similarity`: largest semantic answer drop caused by removing one trace step
+- `step_influence_max_sufficiency_semantic_similarity`: strongest answer signal produced by one trace step alone
 - `time_rewind_total_s` and `rewind_total_generation_calls`: where rewind runtime is actually being spent
 - `mlx_reuse_saved_prefill_tokens_est`, `mlx_reuse_cache_prepare_s_total`, and `mlx_reuse_output_tokens_per_s_est`: whether MLX prompt-cache reuse is likely saving prefill work while decode remains the real bottleneck
 
@@ -262,6 +282,7 @@ The project is moving toward a clearer split between:
 - human-readable streamed reasoning
 - structured atomic traces for measurement
 - rewind operators with novelty constraints
+- step-level causal influence probes
 - better detection of semantic fixed points vs genuine earlier-step recovery
 
 In short: this repo aims to become a practical lab for studying reverse chain-of-thought as a dynamical system.

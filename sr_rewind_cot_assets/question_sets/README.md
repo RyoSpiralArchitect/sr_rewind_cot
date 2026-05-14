@@ -22,10 +22,9 @@ Current files:
   - forward/rewind asymmetry
 
 - `general_reasoning_observation_v1_text.yaml`
-  Text-mode sibling of the main observation batch. It keeps the same six questions
-  and nearly the same settings, but switches `trace_format` to `text` and gives
-  the backend a slightly larger generation budget so open-ended traces are less
-  likely to truncate mid-answer.
+  Text-mode sibling of the fast observation batch. It keeps the same six questions,
+  switches `trace_format` to `text`, and uses the same shorter rewind answer budget
+  plus pyramid tail/oracle sampling as the fast JSON profile.
 
 - `general_reasoning_speculative_v1_fast.yaml`
   A smaller fast profile built around three more speculative general-reasoning prompts.
@@ -46,12 +45,19 @@ Current files:
   from `results/run_20260409_070922/`. This preserves the pre-JSON `general_reasoning`
   setup closely enough to rerun or debug the old behavior.
 
+- `closed_answer_reasoning_v1_text_micro.yaml`
+  A quick text-mode pilot for closed-answer logic tasks. It keeps sample counts
+  low, disables oracle tails and bridge reconstruction, and enables step influence
+  so exact answer transitions and wrong-answer basins are easy to inspect.
+
 Design goals for this set:
 
 - Prefer questions that can produce several local explanatory steps instead of one-line factual answers.
 - Avoid overly domain-specific prompts that mostly test recall.
 - Keep prompts short enough to compare across models and settings.
 - Bias toward tasks where a rewind operator may either recover prerequisites or collapse into a semantic core.
+- Use closed-answer profiles when you want exact-match curves to complement
+  semantic similarity instead of being dominated by paraphrase.
 
 Usage:
 
@@ -91,4 +97,31 @@ python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_pascal_text_reconstructed_20260409.yaml
 ```
 
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/closed_answer_reasoning_v1_text_micro.yaml
+```
+
 You will usually want to edit the backend block first so it matches your local model path or API endpoint.
+
+Text-mode notes:
+
+- Use text profiles when JSON traces are producing schema fragments or when an
+  open-ended question is easier to read as plain steps.
+- Local MLX probes showed clean plain-text traces with no old
+  `StepGenerationResponse(...)` wrapper leakage.
+- Exact string metrics can look pessimistic on text profiles because semantically
+  close explanations often differ by wording. Inspect raw generations and
+  trace-vs-rewind fields before treating `auc_match=0.0` as total failure.
+- Fast and text profiles enable `step_influence_mode: "lite"` so the same fixed
+  question sets can be read through leave-one-out, single-step, and rewind-step
+  substitution probes.
+
+Closed-answer notes:
+
+- Start with the micro profile when you want to see whether the model falls into
+  a named wrong-answer basin before the correct answer appears.
+- Closed-answer tasks make `__match.png` and `__step_influence.png` more directly
+  interpretable than open-ended explanatory prompts.
+- Inspect raw traces before treating a correct final answer as faithful reasoning;
+  some useful runs are valuable precisely because the trace and answer dynamics
+  disagree.

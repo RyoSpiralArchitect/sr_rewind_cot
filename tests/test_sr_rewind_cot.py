@@ -136,6 +136,9 @@ class TestNamingAndPromptAssets(unittest.TestCase):
         questions = cfg.get("questions") or []
         self.assertEqual(experiment.get("trace_format"), "text")
         self.assertEqual(experiment.get("prompt_family"), "general_reasoning")
+        self.assertEqual(experiment.get("rewind_sample_schedule"), "pyramid")
+        self.assertEqual(experiment.get("rewind_answer_max_new_tokens"), 48)
+        self.assertEqual(experiment.get("step_influence_mode"), "lite")
         self.assertEqual(len(questions), 6)
         self.assertIn("binary search", questions[0]["question"].lower())
 
@@ -153,6 +156,7 @@ class TestNamingAndPromptAssets(unittest.TestCase):
         self.assertEqual(full_exp.get("rewind_sample_schedule"), "flat")
         self.assertEqual(fast_exp.get("rewind_answer_max_new_tokens"), 48)
         self.assertEqual(full_exp.get("rewind_answer_max_new_tokens"), 64)
+        self.assertEqual(fast_exp.get("step_influence_mode"), "lite")
 
     def test_general_reasoning_speculative_fast_profile_exists(self) -> None:
         if spbc.yaml is None:
@@ -177,6 +181,7 @@ class TestNamingAndPromptAssets(unittest.TestCase):
         self.assertEqual(exp.get("trace_format"), "text")
         self.assertEqual(exp.get("rewind_sample_schedule"), "pyramid")
         self.assertEqual(exp.get("rewind_answer_max_new_tokens"), 48)
+        self.assertEqual(exp.get("step_influence_mode"), "lite")
         self.assertIn("norm", questions[2]["question"].lower())
 
     def test_general_reasoning_v2_profiles_exist(self) -> None:
@@ -196,6 +201,7 @@ class TestNamingAndPromptAssets(unittest.TestCase):
     def test_docs_exist(self) -> None:
         base = Path(spbc.SCRIPT_DIR) / "docs"
         self.assertTrue((base / "README.md").exists())
+        self.assertTrue((base / "general_reasoning_text_mode.md").exists())
         self.assertTrue((base / "general_reasoning_speculative_v1.md").exists())
         self.assertTrue((base / "plot_field_guide.md").exists())
         self.assertTrue((base / "roadmap.md").exists())
@@ -1251,6 +1257,240 @@ class TestRewindProcessRewardLite(unittest.TestCase):
         self.assertEqual(summary["mlx_reuse_rewind_answer_samples"], 35)
         self.assertAlmostEqual(float(summary["mlx_reuse_output_tokens_per_s_est"] or 0.0), 1200.0 / 18.5, places=6)
         self.assertEqual(summary["mlx_reuse_rewind_answer_output_tokens_est_total"], 1200)
+
+
+class TestSemanticInfluenceMetrics(unittest.TestCase):
+    def test_answer_semantic_stats_strip_generation_markers(self) -> None:
+        stats = spbc.answer_semantic_stats(
+            ["Binary search needs sorted order to eliminate half the array.<|eot_id|>"],
+            "Binary search needs sorted order to eliminate half the array.",
+            threshold=0.95,
+        )
+        self.assertEqual(stats["semantic_match_rate"], 1.0)
+        self.assertGreater(float(stats["semantic_similarity_mean"] or 0.0), 0.95)
+
+    def test_answer_semantic_stats_strip_answer_wrapper(self) -> None:
+        stats = spbc.answer_semantic_stats(
+            ["Answer: Bob<|eot_id|>", "Conclusion: Bob."],
+            "Bob",
+            threshold=0.95,
+        )
+        self.assertEqual(stats["semantic_match_rate"], 1.0)
+        self.assertEqual(stats["content_jaccard_mean"], 1.0)
+
+    def test_answer_semantic_stats_short_answers_do_not_match_unrelated_outputs(self) -> None:
+        stats = spbc.answer_semantic_stats(
+            ["A", "", "Answer: A"],
+            "No",
+            threshold=0.72,
+        )
+        self.assertEqual(stats["semantic_match_rate"], 0.0)
+        self.assertLess(float(stats["semantic_similarity_mean"] or 0.0), 0.72)
+        self.assertEqual(stats["content_jaccard_mean"], 0.0)
+
+    def test_answer_semantic_stats_short_wrapped_answer_matches(self) -> None:
+        stats = spbc.answer_semantic_stats(
+            ["Answer: No.", "no<|eot_id|>"],
+            "No",
+            threshold=0.95,
+        )
+        self.assertEqual(stats["semantic_match_rate"], 1.0)
+        self.assertEqual(stats["semantic_similarity_mean"], 1.0)
+
+    def test_compute_curve_adds_semantic_answer_metrics(self) -> None:
+        class _CurveBackend:
+            def __init__(self) -> None:
+                self.name = "curve"
+
+            def generate(self, prompt: str, temperature: float, seed=None) -> str:
+                if "Partial trace (first 2 steps)" in prompt:
+                    return "Binary search needs sorted order to eliminate half the search space."
+                return "Sorted order lets binary search discard half of the remaining search space."
+
+        trace = spbc.Trace(
+            steps=[
+                "The array is sorted.",
+                "The middle comparison eliminates half the search space.",
+            ],
+            answer="Binary search needs sorted order to eliminate half the search space.",
+        )
+        settings = spbc.ExperimentSettings(
+            n_samples_baseline=1,
+            n_samples_per_k=1,
+            semantic_match_threshold=0.35,
+        )
+        curve = spbc.compute_curve(
+            _CurveBackend(),
+            "Why does binary search require sorting?",
+            trace,
+            settings,
+            run_seed=123,
+        )
+        self.assertIn("auc_semantic_similarity", curve)
+        self.assertGreater(float(curve["auc_semantic_similarity"]), float(curve["auc_match"]))
+        self.assertIn("semantic_similarity_mean", curve["curve"][0])
+
+    def test_step_influence_lite_scores_leave_one_out_and_substitution(self) -> None:
+        class _InfluenceBackend:
+            def __init__(self) -> None:
+                self.name = "influence"
+                self.max_new_tokens = 256
+                self.calls = []
+
+            def generate(self, prompt: str, temperature: float, seed=None) -> str:
+                return self.generate_many(prompt, temperature, [seed])[0]
+
+            def generate_many(self, prompt: str, temperature: float, seeds):
+                self.calls.append({
+                    "prompt": prompt,
+                    "seeds": list(seeds),
+                    "max_new_tokens": self.max_new_tokens,
+                })
+                if "The array is sorted." in prompt:
+                    return ["Binary search needs sorted order to eliminate half the search space." for _ in seeds]
+                return ["Binary search checks the middle element." for _ in seeds]
+
+        backend = _InfluenceBackend()
+        trace = spbc.Trace(
+            steps=[
+                "The array is sorted.",
+                "The middle comparison eliminates half the search space.",
+            ],
+            answer="Binary search needs sorted order to eliminate half the search space.",
+        )
+        settings = spbc.ExperimentSettings(
+            step_influence_mode="lite",
+            step_influence_samples=1,
+            step_influence_max_new_tokens=32,
+            semantic_match_threshold=0.8,
+        )
+        influence = spbc.compute_step_influence_lite(
+            backend,
+            "Why does binary search require sorting?",
+            trace,
+            settings,
+            "Binary search needs sorted order to eliminate half the search space.",
+            run_seed=123,
+            rewind_trace={"forward_order": ["The array is sorted.", "A weaker recovered middle step."]},
+        )
+        self.assertTrue(influence["enabled"])
+        self.assertEqual(influence["max_necessity_step_index"], 0)
+        self.assertEqual(influence["rows"][0]["sufficiency_semantic"], 1.0)
+        self.assertEqual(influence["rows"][0]["necessity_semantic"], 1.0)
+        self.assertTrue(all(call["max_new_tokens"] == 32 for call in backend.calls))
+
+    def test_step_influence_summary_fields(self) -> None:
+        summary = spbc.summarize_step_influence_for_summary({
+            "step_influence": {
+                "mode": "lite",
+                "enabled": True,
+                "step_count": 2,
+                "sample_count": 1,
+                "full_eval": {
+                    "match_rate": 1.0,
+                    "semantic_match_rate": 1.0,
+                    "semantic_similarity_mean": 0.9,
+                },
+                "max_necessity_step_index": 0,
+                "max_necessity_semantic_similarity": 0.4,
+                "max_sufficiency_step_index": 1,
+                "max_sufficiency_semantic_similarity": 0.8,
+                "mean_recovered_substitution_delta_semantic_similarity": -0.1,
+            }
+        })
+        self.assertEqual(summary["step_influence_mode"], "lite")
+        self.assertEqual(summary["step_influence_max_necessity_step"], 0)
+        self.assertAlmostEqual(float(summary["step_influence_full_semantic_similarity_mean"] or 0.0), 0.9)
+
+    def test_plot_run_writes_step_influence_plot(self) -> None:
+        if spbc.plt is None:
+            self.skipTest("matplotlib not available")
+        with _tempdir() as td:
+            payload = {
+                "curve": [
+                    {
+                        "k": 0,
+                        "match_rate": 0.0,
+                        "entropy_bits": 0.0,
+                        "top_answer": "a",
+                        "semantic_match_rate": 0.5,
+                        "semantic_similarity_mean": 0.6,
+                    },
+                    {
+                        "k": 1,
+                        "match_rate": 1.0,
+                        "entropy_bits": 0.0,
+                        "top_answer": "b",
+                        "semantic_match_rate": 1.0,
+                        "semantic_similarity_mean": 0.9,
+                    },
+                ],
+                "smooth_match_rate": [0.0, 1.0],
+                "smooth_semantic_match_rate": [0.5, 1.0],
+                "step_influence": {
+                    "rows": [
+                        {
+                            "step_index": 0,
+                            "necessity_semantic_similarity": 0.4,
+                            "sufficiency_semantic_similarity": 0.8,
+                            "recovered_substitution_delta_semantic_similarity": -0.2,
+                        },
+                        {
+                            "step_index": 1,
+                            "necessity_semantic_similarity": 0.1,
+                            "sufficiency_semantic_similarity": 0.3,
+                            "recovered_substitution_delta_semantic_similarity": 0.05,
+                        },
+                    ]
+                },
+            }
+            (td / "backend__q1.json").write_text(json.dumps(payload), encoding="utf-8")
+            spbc.plot_run(str(td))
+            self.assertTrue((td / "plots" / "backend__q1__step_influence.png").exists())
+
+    def test_run_one_persists_step_influence_jsonl(self) -> None:
+        class _RunBackend:
+            name = "run"
+
+            def generate(self, prompt: str, temperature: float, seed=None) -> str:
+                if "Create a reasoning trace" in prompt:
+                    return json.dumps({
+                        "steps": [
+                            "The array is sorted.",
+                            "The middle comparison eliminates half the search space.",
+                        ],
+                        "answer": "Binary search needs sorted order to eliminate half the search space.",
+                    })
+                if "The array is sorted." in prompt:
+                    return "Binary search needs sorted order to eliminate half the search space."
+                return "Binary search checks the middle element."
+
+            def generate_many(self, prompt: str, temperature: float, seeds):
+                return [self.generate(prompt, temperature, seed) for seed in seeds]
+
+        settings = spbc.ExperimentSettings(
+            enable_rewind=False,
+            enable_bridge=False,
+            n_samples_baseline=1,
+            n_samples_per_k=1,
+            max_steps=2,
+            step_influence_mode="lite",
+            step_influence_samples=1,
+            semantic_match_threshold=0.8,
+        )
+        with _tempdir() as td:
+            res = spbc.run_one_backend_one_question(
+                _RunBackend(),
+                "q1",
+                "Why does binary search require sorting?",
+                settings,
+                str(td),
+                run_seed=123,
+            )
+            self.assertTrue(res["step_influence"]["enabled"])
+            self.assertTrue((td / "run__q1__step_influence.jsonl").exists())
+            saved = json.loads((td / "run__q1.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["step_influence_jsonl"], "run__q1__step_influence.jsonl")
 
 
 class TestMetricsCliHelpers(unittest.TestCase):

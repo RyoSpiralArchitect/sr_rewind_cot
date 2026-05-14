@@ -1,0 +1,9 @@
+{
+  "answer": "No.",
+  "steps": [
+    "All dax are wugs.",
+    "No wugs are mips.",
+    "If all dax are wugs, then being a wug implies being a dax.",
+    "Therefore, a dax may still be a mip."
+  ]
+}

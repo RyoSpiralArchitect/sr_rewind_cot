@@ -753,14 +753,21 @@ def sanitize_trace_answer(answer: str, step_records: Optional[List[Dict[str, Any
 def mean_or_none(xs: List[float]) -> Optional[float]:
     return (sum(xs) / len(xs)) if xs else None
 
+def semantic_text(text: str) -> str:
+    raw = strip_generation_markers(strip_markdown_code_fence(text or "")).strip()
+    if not raw:
+        return ""
+    sanitized = sanitize_trace_answer(raw)
+    return sanitized if sanitized else raw
+
 def sequence_similarity(a: str, b: str) -> float:
     import difflib
-    return difflib.SequenceMatcher(a=normalize_answer(a), b=normalize_answer(b)).ratio()
+    return difflib.SequenceMatcher(a=normalize_answer(semantic_text(a)), b=normalize_answer(semantic_text(b))).ratio()
 
 def content_words(text: str) -> set[str]:
     words = {
         token
-        for token in CONTENT_WORD_RE.findall(normalize_answer(text))
+        for token in CONTENT_WORD_RE.findall(normalize_answer(semantic_text(text)))
         if len(token) >= 3 and token not in COMMON_STOPWORDS
     }
     return words
@@ -778,6 +785,67 @@ def content_jaccard_similarity(a: str, b: str) -> float:
 
 def step_semantic_similarity(a: str, b: str) -> float:
     return max(sequence_similarity(a, b), content_jaccard_similarity(a, b))
+
+def answer_content_words(text: str) -> set[str]:
+    return set(CONTENT_WORD_RE.findall(normalize_answer(semantic_text(text))))
+
+def answer_content_jaccard_similarity(a: str, b: str) -> float:
+    wa = answer_content_words(a)
+    wb = answer_content_words(b)
+    if not wa and not wb:
+        return 1.0 if normalize_answer(semantic_text(a)) == normalize_answer(semantic_text(b)) else 0.0
+    if not wa or not wb:
+        return 0.0
+    inter = len(wa & wb)
+    union = len(wa | wb)
+    return inter / max(1, union)
+
+def answer_semantic_similarity(a: str, b: str) -> float:
+    na = normalize_answer(semantic_text(a))
+    nb = normalize_answer(semantic_text(b))
+    if na and nb and na == nb:
+        return 1.0
+    char_sim = sequence_similarity(a, b)
+    if not answer_content_words(a) or not answer_content_words(b):
+        return char_sim
+    return max(char_sim, answer_content_jaccard_similarity(a, b))
+
+def answer_semantic_stats(
+    answers: List[str],
+    target: str,
+    *,
+    threshold: float = 0.72,
+) -> Dict[str, Any]:
+    target_text = semantic_text(str(target or "")).strip()
+    if not answers or not target_text:
+        return {
+            "semantic_match_rate": 0.0,
+            "semantic_similarity_mean": None,
+            "semantic_similarity_max": None,
+            "semantic_similarity_top_answer": None,
+            "char_similarity_mean": None,
+            "content_jaccard_mean": None,
+        }
+    rows = []
+    for answer in answers:
+        rows.append({
+            "answer": answer,
+            "semantic": answer_semantic_similarity(answer, target_text),
+            "char": sequence_similarity(answer, target_text),
+            "jaccard": answer_content_jaccard_similarity(answer, target_text),
+        })
+    semantic_values = [float(row["semantic"]) for row in rows]
+    char_values = [float(row["char"]) for row in rows]
+    jaccard_values = [float(row["jaccard"]) for row in rows]
+    best = max(rows, key=lambda row: float(row["semantic"])) if rows else {}
+    return {
+        "semantic_match_rate": sum(1 for value in semantic_values if value >= threshold) / max(1, len(semantic_values)),
+        "semantic_similarity_mean": mean_or_none(semantic_values),
+        "semantic_similarity_max": max(semantic_values) if semantic_values else None,
+        "semantic_similarity_top_answer": best.get("answer") if isinstance(best, dict) else None,
+        "char_similarity_mean": mean_or_none(char_values),
+        "content_jaccard_mean": mean_or_none(jaccard_values),
+    }
 
 def first_nonempty_line(text: str) -> str:
     for line in (text or "").splitlines():
@@ -1248,22 +1316,157 @@ def evaluate_explicit_trace_answer_match(
     settings: "ExperimentSettings",
     run_seed: int,
     n_samples: int,
+    max_new_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     prompt = build_answer_from_explicit_trace_prompt(question, steps)
     seeds = [run_seed + i for i in range(max(1, n_samples))]
     with temporary_backend_generation_overrides(
         backend,
-        max_new_tokens=settings.core_certificate_max_new_tokens,
+        max_new_tokens=(settings.core_certificate_max_new_tokens if max_new_tokens is None else max_new_tokens),
     ):
         answers = generate_many_outputs(backend, prompt, temperature=settings.temperature_reanswer, seeds=seeds)
     dist = dist_from_answers(answers)
     target_norm = normalize_answer(target_answer)
     match_rate = dist.get(target_norm, 0) / max(1, len(answers)) if target_norm else 0.0
     top_answer = dist.most_common(1)[0][0] if dist else ""
+    semantic = answer_semantic_stats(
+        answers,
+        target_answer,
+        threshold=settings.semantic_match_threshold,
+    )
     return {
         "match_rate": match_rate,
         "top_answer": top_answer,
         "answers": answers,
+        **semantic,
+    }
+
+def compute_step_influence_lite(
+    backend: Backend,
+    question: str,
+    trace: "Trace",
+    settings: "ExperimentSettings",
+    baseline_answer: str,
+    run_seed: int,
+    *,
+    rewind_trace: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    steps = [str(step).strip() for step in trace.steps[: settings.max_steps] if str(step).strip()]
+    mode = str(settings.step_influence_mode or "off")
+    if mode != "lite" or not steps or not normalize_answer(baseline_answer):
+        return {
+            "mode": mode,
+            "enabled": False,
+            "step_count": len(steps),
+            "rows": [],
+        }
+
+    n_samples = max(1, int(settings.step_influence_samples))
+    recovered_forward = []
+    if isinstance(rewind_trace, dict):
+        recovered_forward = [str(step).strip() for step in (rewind_trace.get("forward_order") or []) if str(step).strip()]
+        if not recovered_forward and rewind_trace.get("latest_to_earlier"):
+            recovered_forward = list(reversed([str(step).strip() for step in rewind_trace.get("latest_to_earlier", []) if str(step).strip()]))
+
+    def _eval(candidate_steps: List[str], seed_offset: int) -> Dict[str, Any]:
+        return evaluate_explicit_trace_answer_match(
+            backend,
+            question,
+            candidate_steps,
+            target_answer=baseline_answer,
+            settings=settings,
+            run_seed=run_seed + seed_offset,
+            n_samples=n_samples,
+            max_new_tokens=settings.step_influence_max_new_tokens,
+        )
+
+    full_eval = _eval(steps, 1_000)
+    full_match = float(full_eval.get("match_rate", 0.0) or 0.0)
+    full_semantic = float(full_eval.get("semantic_match_rate", 0.0) or 0.0)
+    full_semantic_mean = float(full_eval.get("semantic_similarity_mean", 0.0) or 0.0)
+
+    rows: List[Dict[str, Any]] = []
+    for idx, step in enumerate(steps):
+        ablated = steps[:idx] + steps[idx + 1:]
+        leave_eval = _eval(ablated, 10_000 + idx * 1_000)
+        single_eval = _eval([step], 20_000 + idx * 1_000)
+
+        recovered_step = recovered_forward[idx] if idx < len(recovered_forward) else None
+        substitution_eval = None
+        if recovered_step:
+            substituted = list(steps)
+            substituted[idx] = recovered_step
+            substitution_eval = _eval(substituted, 30_000 + idx * 1_000)
+
+        leave_match = float(leave_eval.get("match_rate", 0.0) or 0.0)
+        single_match = float(single_eval.get("match_rate", 0.0) or 0.0)
+        leave_semantic = float(leave_eval.get("semantic_match_rate", 0.0) or 0.0)
+        single_semantic = float(single_eval.get("semantic_match_rate", 0.0) or 0.0)
+        leave_semantic_mean = float(leave_eval.get("semantic_similarity_mean", 0.0) or 0.0)
+        single_semantic_mean = float(single_eval.get("semantic_similarity_mean", 0.0) or 0.0)
+
+        substitution_match = None
+        substitution_semantic = None
+        substitution_semantic_mean = None
+        if isinstance(substitution_eval, dict):
+            substitution_match = float(substitution_eval.get("match_rate", 0.0) or 0.0)
+            substitution_semantic = float(substitution_eval.get("semantic_match_rate", 0.0) or 0.0)
+            substitution_semantic_mean = float(substitution_eval.get("semantic_similarity_mean", 0.0) or 0.0)
+
+        rows.append({
+            "step_index": idx,
+            "step": step,
+            "recovered_step": recovered_step,
+            "recovered_step_similarity": (step_semantic_similarity(step, recovered_step) if recovered_step else None),
+            "leave_one_out_match_rate": leave_match,
+            "leave_one_out_semantic_match_rate": leave_semantic,
+            "leave_one_out_semantic_similarity_mean": leave_semantic_mean,
+            "necessity_exact": clamp01(full_match - leave_match),
+            "necessity_semantic": clamp01(full_semantic - leave_semantic),
+            "necessity_semantic_similarity": clamp01(full_semantic_mean - leave_semantic_mean),
+            "single_step_match_rate": single_match,
+            "single_step_semantic_match_rate": single_semantic,
+            "single_step_semantic_similarity_mean": single_semantic_mean,
+            "sufficiency_exact": single_match,
+            "sufficiency_semantic": single_semantic,
+            "sufficiency_semantic_similarity": single_semantic_mean,
+            "recovered_substitution_match_rate": substitution_match,
+            "recovered_substitution_semantic_match_rate": substitution_semantic,
+            "recovered_substitution_semantic_similarity_mean": substitution_semantic_mean,
+            "recovered_substitution_delta_exact": (None if substitution_match is None else substitution_match - full_match),
+            "recovered_substitution_delta_semantic": (None if substitution_semantic is None else substitution_semantic - full_semantic),
+            "recovered_substitution_delta_semantic_similarity": (
+                None if substitution_semantic_mean is None else substitution_semantic_mean - full_semantic_mean
+            ),
+        })
+
+    def _best_index(key: str) -> Optional[int]:
+        valid = [row for row in rows if row.get(key) is not None]
+        if not valid:
+            return None
+        return int(max(valid, key=lambda row: float(row.get(key, 0.0) or 0.0)).get("step_index", 0))
+
+    substitution_deltas = [
+        float(row["recovered_substitution_delta_semantic_similarity"])
+        for row in rows
+        if row.get("recovered_substitution_delta_semantic_similarity") is not None
+    ]
+    return {
+        "mode": "lite",
+        "enabled": True,
+        "step_count": len(steps),
+        "sample_count": n_samples,
+        "semantic_match_threshold": settings.semantic_match_threshold,
+        "answer_max_new_tokens": settings.step_influence_max_new_tokens,
+        "full_eval": full_eval,
+        "max_necessity_step_index": _best_index("necessity_semantic_similarity"),
+        "max_necessity_semantic_similarity": max((float(row.get("necessity_semantic_similarity", 0.0) or 0.0) for row in rows), default=None),
+        "max_sufficiency_step_index": _best_index("sufficiency_semantic_similarity"),
+        "max_sufficiency_semantic_similarity": max((float(row.get("sufficiency_semantic_similarity", 0.0) or 0.0) for row in rows), default=None),
+        "mean_necessity_semantic_similarity": mean_or_none([float(row.get("necessity_semantic_similarity", 0.0) or 0.0) for row in rows]),
+        "mean_sufficiency_semantic_similarity": mean_or_none([float(row.get("sufficiency_semantic_similarity", 0.0) or 0.0) for row in rows]),
+        "mean_recovered_substitution_delta_semantic_similarity": mean_or_none(substitution_deltas),
+        "rows": rows,
     }
 
 def compute_core_certificate_lite(
@@ -1932,6 +2135,30 @@ def rewind_axes_jsonl_rows(comp: Dict[str, Any]) -> List[Dict[str, Any]]:
         "rewind_prm_len": comp.get("rewind_prm_len"),
         "rewind_base_prm_similarity_mean": ((comp.get("rewind_base_prm") or {}).get("similarity_mean") if isinstance(comp.get("rewind_base_prm"), dict) else None),
         "rewind_base_prm_preservation_rate": ((comp.get("rewind_base_prm") or {}).get("preservation_rate") if isinstance(comp.get("rewind_base_prm"), dict) else None),
+    }]
+    for row in comp.get("rows", []) or []:
+        item = dict(row)
+        item["record_type"] = "step"
+        rows.append(item)
+    return rows
+
+def step_influence_jsonl_rows(comp: Dict[str, Any]) -> List[Dict[str, Any]]:
+    full_eval = comp.get("full_eval") or {}
+    rows = [{
+        "record_type": "summary",
+        "mode": comp.get("mode"),
+        "enabled": comp.get("enabled"),
+        "step_count": comp.get("step_count"),
+        "sample_count": comp.get("sample_count"),
+        "semantic_match_threshold": comp.get("semantic_match_threshold"),
+        "full_match_rate": (full_eval.get("match_rate") if isinstance(full_eval, dict) else None),
+        "full_semantic_match_rate": (full_eval.get("semantic_match_rate") if isinstance(full_eval, dict) else None),
+        "full_semantic_similarity_mean": (full_eval.get("semantic_similarity_mean") if isinstance(full_eval, dict) else None),
+        "max_necessity_step_index": comp.get("max_necessity_step_index"),
+        "max_necessity_semantic_similarity": comp.get("max_necessity_semantic_similarity"),
+        "max_sufficiency_step_index": comp.get("max_sufficiency_step_index"),
+        "max_sufficiency_semantic_similarity": comp.get("max_sufficiency_semantic_similarity"),
+        "mean_recovered_substitution_delta_semantic_similarity": comp.get("mean_recovered_substitution_delta_semantic_similarity"),
     }]
     for row in comp.get("rows", []) or []:
         item = dict(row)
@@ -2954,6 +3181,9 @@ class CurvePoint:
     top_answer: str
     js_div_full: Optional[float] = None
     kl_div_full: Optional[float] = None
+    semantic_match_rate: Optional[float] = None
+    semantic_similarity_mean: Optional[float] = None
+    semantic_similarity_max: Optional[float] = None
 
 @dataclass
 class ExperimentSettings:
@@ -2984,6 +3214,11 @@ class ExperimentSettings:
 
     compute_divergence: bool = True
     divergence_alpha: float = 1e-6
+    semantic_match_threshold: float = 0.72
+
+    step_influence_mode: str = "off"  # off|lite
+    step_influence_samples: int = 2
+    step_influence_max_new_tokens: int = 48
 
     permutation_tests: int = 0  # 0 disables
     permutation_seed: int = 1234
@@ -3692,6 +3927,11 @@ def compute_tail_curve(
             match = dist_d.get(baseline_A_star, 0) / max(1, sum(dist_d.values()))
         top = dist_d.most_common(1)[0][0] if dist_d else ""
         ent = entropy_bits_from_counts(dist_d)
+        semantic_stats = answer_semantic_stats(
+            answers_depth,
+            baseline_A_star,
+            threshold=settings.semantic_match_threshold,
+        )
 
         jsd = None
         kld = None
@@ -3702,10 +3942,23 @@ def compute_tail_curve(
             jsd = js_divergence(p, q)
             kld = kl_divergence(p, q)
 
-        curve.append(CurvePoint(k=depth, match_rate=match, entropy_bits=ent, top_answer=top, js_div_full=jsd, kl_div_full=kld))
+        curve.append(CurvePoint(
+            k=depth,
+            match_rate=match,
+            entropy_bits=ent,
+            top_answer=top,
+            js_div_full=jsd,
+            kl_div_full=kld,
+            semantic_match_rate=semantic_stats.get("semantic_match_rate"),
+            semantic_similarity_mean=semantic_stats.get("semantic_similarity_mean"),
+            semantic_similarity_max=semantic_stats.get("semantic_similarity_max"),
+        ))
 
     match_series = [pt.match_rate for pt in curve]
     smooth_match = moving_average(match_series, settings.smooth_window)
+    semantic_match_series = [float(pt.semantic_match_rate or 0.0) for pt in curve]
+    semantic_similarity_series = [float(pt.semantic_similarity_mean or 0.0) for pt in curve]
+    smooth_semantic_match = moving_average(semantic_match_series, settings.smooth_window)
     converge_depth = find_converge_k(smooth_match, settings.tau, settings.converge_min_run)
     collapse_depth = find_collapse_k(smooth_match, settings.tau, settings.collapse_min_run)
     d = discrete_derivative(smooth_match)
@@ -3728,6 +3981,8 @@ def compute_tail_curve(
     plateau = plateau_mean if plateau_mean is not None else 0.0
     attractor_strength = conv_score * plateau
     auc_match = sum(smooth_match) / max(1, len(smooth_match)) if smooth_match else 0.0
+    auc_semantic_match = sum(smooth_semantic_match) / max(1, len(smooth_semantic_match)) if smooth_semantic_match else 0.0
+    auc_semantic_similarity = sum(semantic_similarity_series) / max(1, len(semantic_similarity_series)) if semantic_similarity_series else 0.0
 
     out = {
         "label": label,
@@ -3745,8 +4000,12 @@ def compute_tail_curve(
         "plateau_mean": plateau_mean,
         "attractor_strength": attractor_strength,
         "auc_match": auc_match,
+        "semantic_match_threshold": settings.semantic_match_threshold,
+        "auc_semantic_match": auc_semantic_match,
+        "auc_semantic_similarity": auc_semantic_similarity,
         "curve": [dataclasses.asdict(pt) for pt in curve],
         "smooth_match_rate": smooth_match,
+        "smooth_semantic_match_rate": smooth_semantic_match,
     }
     if save_raw:
         out["raw_answers_by_depth"] = raw_answers_by_depth
@@ -4794,6 +5053,11 @@ def compute_curve(
 
         top = dist_k.most_common(1)[0][0] if dist_k else ""
         ent = entropy_bits_from_counts(dist_k)
+        semantic_stats = answer_semantic_stats(
+            answers_k,
+            A_star,
+            threshold=settings.semantic_match_threshold,
+        )
 
         jsd = None
         kld = None
@@ -4803,11 +5067,24 @@ def compute_curve(
             q = _to_prob(baseline_dist, support, alpha=settings.divergence_alpha)
             jsd = js_divergence(p, q)
             kld = kl_divergence(p, q)
-        curve.append(CurvePoint(k=k, match_rate=match, entropy_bits=ent, top_answer=top, js_div_full=jsd, kl_div_full=kld))
+        curve.append(CurvePoint(
+            k=k,
+            match_rate=match,
+            entropy_bits=ent,
+            top_answer=top,
+            js_div_full=jsd,
+            kl_div_full=kld,
+            semantic_match_rate=semantic_stats.get("semantic_match_rate"),
+            semantic_similarity_mean=semantic_stats.get("semantic_similarity_mean"),
+            semantic_similarity_max=semantic_stats.get("semantic_similarity_max"),
+        ))
 
     # Smoothing
     match_series = [pt.match_rate for pt in curve]
     smooth_match = moving_average(match_series, settings.smooth_window)
+    semantic_match_series = [float(pt.semantic_match_rate or 0.0) for pt in curve]
+    semantic_similarity_series = [float(pt.semantic_similarity_mean or 0.0) for pt in curve]
+    smooth_semantic_match = moving_average(semantic_match_series, settings.smooth_window)
 
     # Converge / collapse with min-run on smoothed series
     converge_k = find_converge_k(smooth_match, settings.tau, settings.converge_min_run)
@@ -4839,6 +5116,8 @@ def compute_curve(
 
     # AUC of match_rate (smoothed) as an overall stability mass
     auc_match = sum(smooth_match) / max(1, len(smooth_match)) if smooth_match else 0.0
+    auc_semantic_match = sum(smooth_semantic_match) / max(1, len(smooth_semantic_match)) if smooth_semantic_match else 0.0
+    auc_semantic_similarity = sum(semantic_similarity_series) / max(1, len(semantic_similarity_series)) if semantic_similarity_series else 0.0
 
     # Hysteresis: collapse - converge (None-safe)
     hysteresis = None
@@ -4865,8 +5144,12 @@ def compute_curve(
         "plateau_mean": plateau_mean,
         "attractor_strength": attractor_strength,
         "auc_match": auc_match,
+        "semantic_match_threshold": settings.semantic_match_threshold,
+        "auc_semantic_match": auc_semantic_match,
+        "auc_semantic_similarity": auc_semantic_similarity,
         "curve": [dataclasses.asdict(pt) for pt in curve],
         "smooth_match_rate": smooth_match,
+        "smooth_semantic_match_rate": smooth_semantic_match,
     }
     if save_raw:
         out["baseline_raw_answers"] = baseline_answers[:]
@@ -5026,6 +5309,7 @@ def summarize_runtime_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
         "time_rewind_trace_s": (rewind_timings.get("rewind_trace_s") if isinstance(rewind_timings, dict) else None),
         "time_rewind_curve_s": (rewind_timings.get("rewind_curve_s") if isinstance(rewind_timings, dict) else None),
         "time_oracle_tail_curve_s": (rewind_timings.get("oracle_tail_curve_s") if isinstance(rewind_timings, dict) else None),
+        "time_step_influence_s": (stage.get("step_influence_s") if isinstance(stage, dict) else None),
         "time_bridge_total_s": (stage.get("bridge_total_s") if isinstance(stage, dict) else None),
         "time_permutation_tests_s": (stage.get("permutation_tests_s") if isinstance(stage, dict) else None),
         "time_total_s": (stage.get("total_s") if isinstance(stage, dict) else None),
@@ -5081,6 +5365,12 @@ def summarize_trace_axes_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
         "trace_axis_prm_rewind_similarity_mean": (prm_rewind.get("similarity_mean") if isinstance(prm_rewind, dict) else None),
         "trace_axis_prm_rewind_preservation_rate": (prm_rewind.get("preservation_rate") if isinstance(prm_rewind, dict) else None),
     }
+
+def summarize_semantic_answer_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+    return metrics.summarize_semantic_answer_for_summary(res)
+
+def summarize_step_influence_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+    return metrics.summarize_step_influence_for_summary(res)
 
 # ----------------------------- config & IO -----------------------------
 
@@ -5187,6 +5477,11 @@ def parse_experiment_settings(cfg: Dict[str, Any]) -> ExperimentSettings:
 
         compute_divergence=bool(e.get("compute_divergence", True)),
         divergence_alpha=float(e.get("divergence_alpha", 1e-6)),
+        semantic_match_threshold=float(e.get("semantic_match_threshold", 0.72)),
+
+        step_influence_mode=str(e.get("step_influence_mode", "off")),
+        step_influence_samples=int(e.get("step_influence_samples", 2)),
+        step_influence_max_new_tokens=int(e.get("step_influence_max_new_tokens", 48)),
 
         permutation_tests=int(e.get("permutation_tests", 0)),
         permutation_seed=int(e.get("permutation_seed", 1234)),
@@ -5234,6 +5529,10 @@ def parse_experiment_settings(cfg: Dict[str, Any]) -> ExperimentSettings:
     s.process_reward_mode = s.process_reward_mode if s.process_reward_mode in ("off", "lite") else "off"
     s.trace_candidates = max(1, s.trace_candidates)
     s.trace_candidate_temperature = max(0.0, s.trace_candidate_temperature)
+    s.semantic_match_threshold = max(0.0, min(1.0, s.semantic_match_threshold))
+    s.step_influence_mode = s.step_influence_mode if s.step_influence_mode in ("off", "lite") else "off"
+    s.step_influence_samples = max(1, s.step_influence_samples)
+    s.step_influence_max_new_tokens = max(8, s.step_influence_max_new_tokens)
     s.rewind_order = s.rewind_order if s.rewind_order in ("reverse", "forward") else "reverse"
     s.rewind_process_reward_mode = s.rewind_process_reward_mode if s.rewind_process_reward_mode in ("off", "lite") else "off"
     s.rewind_step_candidates = max(1, s.rewind_step_candidates)
@@ -5278,6 +5577,8 @@ def plot_run(run_dir: str) -> None:
             continue
         ks = [pt["k"] for pt in curve]
         match = [pt["match_rate"] for pt in curve]
+        semantic_match = [pt.get("semantic_match_rate") for pt in curve]
+        semantic_similarity = [pt.get("semantic_similarity_mean") for pt in curve]
         ent = [pt["entropy_bits"] for pt in curve]
         jsd = [pt.get("js_div_full") for pt in curve]
         kld = [pt.get("kl_div_full") for pt in curve]
@@ -5285,12 +5586,20 @@ def plot_run(run_dir: str) -> None:
         base = fn.replace(".json", "")
         # match
         plt.figure()
-        plt.plot(ks, match, marker="o")
+        plt.plot(ks, match, marker="o", label="exact_match")
         if smooth is not None:
-            plt.plot(ks, smooth, marker="x")
+            plt.plot(ks, smooth, marker="x", label="exact_smooth")
+        if any(v is not None for v in semantic_match):
+            plt.plot(ks, [float(v) if v is not None else float("nan") for v in semantic_match], marker="s", label="semantic_match")
+            semantic_smooth = obj.get("smooth_semantic_match_rate")
+            if semantic_smooth is not None:
+                plt.plot(ks, semantic_smooth, marker="^", label="semantic_smooth")
+        if any(v is not None for v in semantic_similarity):
+            plt.plot(ks, [float(v) if v is not None else float("nan") for v in semantic_similarity], linestyle="--", marker=".", label="semantic_similarity")
         plt.xlabel("k (prefix length)")
-        plt.ylabel("match_rate")
+        plt.ylabel("answer preservation")
         plt.title(f"{base} match_rate")
+        plt.legend()
         plt.tight_layout()
         plt.savefig(os.path.join(plots_dir, f"{base}__match.png"), dpi=160)
         plt.close()
@@ -5443,6 +5752,33 @@ def plot_run(run_dir: str) -> None:
                 plt.legend()
                 plt.tight_layout()
                 plt.savefig(os.path.join(plots_dir, f"{base}__rewind_axes_similarity.png"), dpi=160)
+                plt.close()
+
+        step_influence = obj.get("step_influence")
+        if isinstance(step_influence, dict):
+            rows = step_influence.get("rows") or []
+            if rows:
+                idx = [int(row.get("step_index", i)) for i, row in enumerate(rows)]
+                necessity = [float(row.get("necessity_semantic_similarity", 0.0) or 0.0) for row in rows]
+                sufficiency = [float(row.get("sufficiency_semantic_similarity", 0.0) or 0.0) for row in rows]
+                substitution = [
+                    float(row.get("recovered_substitution_delta_semantic_similarity"))
+                    if row.get("recovered_substitution_delta_semantic_similarity") is not None
+                    else float("nan")
+                    for row in rows
+                ]
+                plt.figure()
+                plt.bar([x - 0.24 for x in idx], necessity, width=0.24, label="necessity")
+                plt.bar(idx, sufficiency, width=0.24, label="sufficiency")
+                if any(not math.isnan(v) for v in substitution):
+                    plt.bar([x + 0.24 for x in idx], substitution, width=0.24, label="rewind_substitution_delta")
+                plt.axhline(0.0, color="black", linewidth=0.8)
+                plt.xlabel("step index")
+                plt.ylabel("semantic influence")
+                plt.title(f"{base} step influence")
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(os.path.join(plots_dir, f"{base}__step_influence.png"), dpi=160)
                 plt.close()
 
         process_reward = obj.get("trace_process_reward")
@@ -5727,6 +6063,27 @@ def run_one_backend_one_question(
     rewind_axes = build_rewind_axis_comparison(rewind_trace_obj) if isinstance(rewind_trace_obj, dict) else None
     if rewind_axes is not None:
         res["rewind_axes"] = rewind_axes
+    step_influence = None
+    if settings.step_influence_mode == "lite":
+        try:
+            t0 = time.perf_counter()
+            step_influence = compute_step_influence_lite(
+                active_backend,
+                question,
+                trace,
+                settings,
+                str(res.get("A_star", "")),
+                run_seed=run_seed + 80_000,
+                rewind_trace=(rewind_trace_obj if isinstance(rewind_trace_obj, dict) else None),
+            )
+            stage_timings["step_influence_s"] = time.perf_counter() - t0
+            res["step_influence"] = step_influence
+        except Exception as e:
+            res["step_influence"] = {
+                "mode": settings.step_influence_mode,
+                "enabled": False,
+                "error": str(e),
+            }
     if "trace_build_s" not in stage_timings:
         stage_timings["trace_build_s"] = 0.0
     res["stage_timings_s"] = {
@@ -5761,6 +6118,11 @@ def run_one_backend_one_question(
         rewind_axes_path = os.path.join(out_dir, f"{backend.name}__{qid}__rewind_axes.jsonl")
         write_jsonl(rewind_axes_path, rewind_axes_jsonl_rows(rewind_axes))
         res["rewind_axes_jsonl"] = os.path.basename(rewind_axes_path)
+        write_json(out_path, res)
+    if isinstance(step_influence, dict):
+        step_influence_path = os.path.join(out_dir, f"{backend.name}__{qid}__step_influence.jsonl")
+        write_jsonl(step_influence_path, step_influence_jsonl_rows(step_influence))
+        res["step_influence_jsonl"] = os.path.basename(step_influence_path)
         write_json(out_path, res)
     return res
 
@@ -5883,6 +6245,8 @@ def run_experiment(config_path: str) -> str:
             row.update(metrics.summarize_rewind_core_for_summary(res))
             row.update(metrics.summarize_rewind_process_reward_for_summary(res))
             row.update(metrics.summarize_rewind_axes_for_summary(res))
+            row.update(metrics.summarize_semantic_answer_for_summary(res))
+            row.update(metrics.summarize_step_influence_for_summary(res))
             row.update(metrics.summarize_runtime_for_summary(res))
             row.update(metrics.summarize_mlx_reuse_for_summary(res))
             summary_rows.append(row)
@@ -5938,6 +6302,10 @@ def run_quick_hf(args: argparse.Namespace) -> str:
 
         compute_divergence=not args.no_divergence,
         divergence_alpha=args.div_alpha,
+        semantic_match_threshold=args.semantic_match_threshold,
+        step_influence_mode=args.step_influence_mode,
+        step_influence_samples=args.step_influence_samples,
+        step_influence_max_new_tokens=args.step_influence_max_new_tokens,
 
         permutation_tests=args.permute,
         permutation_seed=args.permute_seed,
@@ -6049,6 +6417,8 @@ def run_quick_hf(args: argparse.Namespace) -> str:
     summary_row.update(metrics.summarize_rewind_core_for_summary(res))
     summary_row.update(metrics.summarize_rewind_process_reward_for_summary(res))
     summary_row.update(metrics.summarize_rewind_axes_for_summary(res))
+    summary_row.update(metrics.summarize_semantic_answer_for_summary(res))
+    summary_row.update(metrics.summarize_step_influence_for_summary(res))
     summary_row.update(metrics.summarize_runtime_for_summary(res))
     summary_row.update(metrics.summarize_mlx_reuse_for_summary(res))
     write_text(os.path.join(out_dir, "summary.csv"), metrics.to_csv([summary_row]))
@@ -6083,6 +6453,10 @@ def run_quick_http(args: argparse.Namespace) -> str:
 
         compute_divergence=not args.no_divergence,
         divergence_alpha=args.div_alpha,
+        semantic_match_threshold=args.semantic_match_threshold,
+        step_influence_mode=args.step_influence_mode,
+        step_influence_samples=args.step_influence_samples,
+        step_influence_max_new_tokens=args.step_influence_max_new_tokens,
 
         permutation_tests=args.permute,
         permutation_seed=args.permute_seed,
@@ -6183,6 +6557,8 @@ def run_quick_http(args: argparse.Namespace) -> str:
     summary_row.update(metrics.summarize_rewind_core_for_summary(res))
     summary_row.update(metrics.summarize_rewind_process_reward_for_summary(res))
     summary_row.update(metrics.summarize_rewind_axes_for_summary(res))
+    summary_row.update(metrics.summarize_semantic_answer_for_summary(res))
+    summary_row.update(metrics.summarize_step_influence_for_summary(res))
     summary_row.update(metrics.summarize_runtime_for_summary(res))
     summary_row.update(metrics.summarize_mlx_reuse_for_summary(res))
     write_text(os.path.join(out_dir, "summary.csv"), metrics.to_csv([summary_row]))
@@ -6246,6 +6622,11 @@ experiment:
 
   compute_divergence: true
   divergence_alpha: 1.0e-6
+  semantic_match_threshold: 0.72
+
+  step_influence_mode: off        # off | lite
+  step_influence_samples: 2
+  step_influence_max_new_tokens: 48
 
   permutation_tests: 0             # >0 enables permutation test runs (costly)
   permutation_seed: 1234
@@ -6329,6 +6710,10 @@ def add_common_curve_args(p: argparse.ArgumentParser) -> None:
     # divergence
     p.add_argument("--no-divergence", action="store_true")
     p.add_argument("--div-alpha", type=float, default=1e-6)
+    p.add_argument("--semantic-match-threshold", type=float, default=0.72, help="Similarity threshold for semantic answer preservation metrics.")
+    p.add_argument("--step-influence-mode", default="off", choices=["off", "lite"], help="Optional step-level causal influence pass.")
+    p.add_argument("--step-influence-samples", type=int, default=2, help="Samples per step intervention in lite step influence mode.")
+    p.add_argument("--step-influence-max-new-tokens", type=int, default=48, help="Max new tokens for step influence answer decoding.")
 
     # permutation tests
     p.add_argument("--permute", type=int, default=0, help="Number of permutation tests (shuffle steps).")

@@ -56,7 +56,22 @@ How to read it:
 - If the chosen candidate is much shorter than the rest, the pseudo-PRM may be
   rewarding cleanliness or parseability more than reasoning richness.
 
-## 5. `__rewind_novelty.png`
+## 5. `__step_influence.png`
+
+What it shows:
+
+- Leave-one-out necessity, single-step sufficiency, and recovered-step
+  substitution for each forward trace step.
+
+How to read it:
+
+- High necessity with low sufficiency suggests a step is locally important but
+  needs surrounding context.
+- High sufficiency suggests a semantic core or answer-like step.
+- A negative substitution delta means the matching rewind step sounds plausible
+  but weakens answer preservation.
+
+## 6. `__rewind_novelty.png`
 
 What it shows:
 
@@ -78,5 +93,6 @@ For a new run, a good default order is:
 2. `__trace_candidate_scores.png`
 3. `__trace_vs_rewind_similarity.png`
 4. `__rewind_compare.png`
-5. `__rewind_axes_similarity.png`
-6. question JSON and JSONL files
+5. `__step_influence.png`
+6. `__rewind_axes_similarity.png`
+7. question JSON and JSONL files

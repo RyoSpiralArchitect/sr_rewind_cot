@@ -1,0 +1,106 @@
+# Closed-answer reasoning micro profile.
+# This profile is designed for quick local probes where exact answer transitions
+# should be easier to read than in open-ended explanatory tasks.
+
+api:
+  timeout_s: 180
+
+backends:
+  - name: llama-3.2-it
+    type: hf_local
+    model: "./model/llama-3.2-3b"
+    device: "mps"
+    hf_backend: "auto"
+    dtype: "float16"
+    max_new_tokens: 192
+    top_p: 1.0
+    top_k: 50
+    repetition_penalty: 1.0
+
+experiment:
+  trace_mode: "masked"
+  trace_source: "per_backend"
+  trace_format: "text"
+  stream_output: false
+  temperature_trace: 0.0
+  process_reward_mode: "off"
+  trace_candidates: 1
+  trace_candidate_temperature: 0.6
+  temperature_reanswer: 0.4
+  n_samples_baseline: 1
+  n_samples_per_k: 1
+  tau: 0.8
+  max_steps: 8
+  prompt_version: "v2"
+  prompt_family: "general_reasoning"
+
+  baseline_min_conf: null
+  baseline_max_entropy: null
+  skip_unstable_baseline: false
+
+  smooth_window: 1
+  converge_min_run: 1
+  collapse_min_run: 1
+
+  compute_divergence: true
+  divergence_alpha: 1.0e-6
+  semantic_match_threshold: 0.72
+
+  step_influence_mode: "lite"
+  step_influence_samples: 1
+  step_influence_max_new_tokens: 16
+
+  permutation_tests: 0
+  permutation_seed: 1234
+
+  enable_rewind: true
+  rewind_step_temperature: 0.5
+  rewind_samples_per_depth: 1
+  rewind_answer_max_new_tokens: 16
+  rewind_sample_schedule: "flat"
+  rewind_sample_min_per_depth: 1
+  rewind_order: "reverse"
+  compute_oracle_tail: false
+  rewind_process_reward_mode: "off"
+  rewind_step_candidates: 1
+  rewind_novelty_max_similarity: 0.82
+  rewind_novelty_retries: 0
+  rewind_escape_temperature: 0.8
+  rewind_step_top_p: 0.9
+  rewind_step_repetition_penalty: 1.05
+
+  enable_bridge: false
+  bridge_tail_source: "recovered"
+  bridge_samples_per_cell: 0
+  bridge_num_prefix_points: 9
+  bridge_num_tail_points: 9
+  bridge_allow_overlap: false
+  bridge_middle_temperature: 0.0
+  bridge_reconstruct_middle: true
+  bridge_middle_cases: 5
+  bridge_loop_closure_samples: 3
+  bridge_core_cluster_similarity: 0.72
+  bridge_core_min_loop_closure: 0.75
+  bridge_core_min_match: 0.75
+  bridge_core_min_synergy: 0.0
+  bridge_core_top_prototypes: 6
+
+  save_raw_generations: true
+  save_generation_log_jsonl: true
+
+questions:
+  - id: carol_trap
+    # Expected external answer: Bob.
+    question: "A crime was committed by exactly one of Alice, Bob, and Carol. Alice says, 'Bob did it.' Bob says, 'Alice did it.' Carol says, 'Bob is telling the truth.' Exactly one statement is true. Who did it? Reply with exactly one line: Answer: <name>."
+
+  - id: mislabeled_boxes
+    # Expected external answer: Apples.
+    question: "Three boxes are labeled Apples, Oranges, and Mixed, but every label is wrong. You draw one fruit from the box labeled Mixed and it is an apple. What is the true contents of the box labeled Mixed? Reply with exactly one line: Answer: <Apples/Oranges/Mixed>."
+
+  - id: knight_knave_pair
+    # Expected external answer: knight.
+    question: "On an island, knights always tell the truth and knaves always lie. Person A says, 'B is a knave.' Person B says, 'A and I are the same type.' What is A? Reply with exactly one line: Answer: <knight/knave>."
+
+  - id: syllogism_exclusion
+    # Expected external answer: No.
+    question: "All dax are wugs. No wugs are mips. Can any dax be a mip? Reply with exactly one line: Answer: <yes/no>."

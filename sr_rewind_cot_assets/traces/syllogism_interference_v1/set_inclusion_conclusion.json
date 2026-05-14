@@ -1,0 +1,8 @@
+{
+  "answer": "No.",
+  "steps": [
+    "Every dax is inside the class of wugs.",
+    "The class of wugs has no overlap with the class of mips.",
+    "Therefore, the class of dax has no overlap with the class of mips."
+  ]
+}

@@ -43,6 +43,19 @@ For text-mode runs, inspect these fields together:
 - `trace_vs_rewind_preservation_rate`
 - `rewind_loop_closure_mean`
 
+## Closed-Answer Companion
+
+The Carol-trap pilot showed a useful contrast with open-ended explanatory tasks.
+With a fixed answer surface, the forward curve can expose named wrong-answer
+basins directly. In that run, prefix answers moved from `Carol` to `Alice` to the
+final `Bob`, while the recovered rewind curve stayed in the Carol basin.
+
+Use `closed_answer_reasoning_v1_text_micro.yaml` when you want this kind of
+answer-space geometry to be visible quickly. It is not a replacement for the
+open-ended text profile; it is a companion instrument for cases where exact
+answer transitions, step influence, and reverse-reconstruction failures should be
+read together.
+
 ## Runtime Profile
 
 The text profile uses the same fast rewind budget as

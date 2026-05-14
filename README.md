@@ -192,11 +192,19 @@ python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_observation_v2_full.yaml
 ```
 
+### 5h. Run the closed-answer reasoning micro profile
+
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/closed_answer_reasoning_v1_text_micro.yaml
+```
+
 When to use `fast` vs `full`:
 
 - Use `fast` for quick sweeps, prompt iteration, and profiling loops.
 - Use `full` for slower, more conservative rewind comparisons when you want to inspect the results closely.
 - Use `text` when the reasoning content looks good but JSON formatting artifacts are getting in the way.
+- Use `closed-answer micro` when you want exact answer transitions and
+  wrong-answer basins to be visible without fighting open-ended paraphrase.
 - Actual runtime can still vary a lot with trace length and question behavior, so compare both on the same batch when in doubt.
 
 ### 6. Inspect or compare metrics without rerunning the experiment

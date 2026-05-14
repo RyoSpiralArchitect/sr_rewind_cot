@@ -45,12 +45,19 @@ Current files:
   from `results/run_20260409_070922/`. This preserves the pre-JSON `general_reasoning`
   setup closely enough to rerun or debug the old behavior.
 
+- `closed_answer_reasoning_v1_text_micro.yaml`
+  A quick text-mode pilot for closed-answer logic tasks. It keeps sample counts
+  low, disables oracle tails and bridge reconstruction, and enables step influence
+  so exact answer transitions and wrong-answer basins are easy to inspect.
+
 Design goals for this set:
 
 - Prefer questions that can produce several local explanatory steps instead of one-line factual answers.
 - Avoid overly domain-specific prompts that mostly test recall.
 - Keep prompts short enough to compare across models and settings.
 - Bias toward tasks where a rewind operator may either recover prerequisites or collapse into a semantic core.
+- Use closed-answer profiles when you want exact-match curves to complement
+  semantic similarity instead of being dominated by paraphrase.
 
 Usage:
 
@@ -90,6 +97,10 @@ python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general
 python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/general_reasoning_pascal_text_reconstructed_20260409.yaml
 ```
 
+```bash
+python3 sr_rewind_cot.py run --config sr_rewind_cot_assets/question_sets/closed_answer_reasoning_v1_text_micro.yaml
+```
+
 You will usually want to edit the backend block first so it matches your local model path or API endpoint.
 
 Text-mode notes:
@@ -104,3 +115,13 @@ Text-mode notes:
 - Fast and text profiles enable `step_influence_mode: "lite"` so the same fixed
   question sets can be read through leave-one-out, single-step, and rewind-step
   substitution probes.
+
+Closed-answer notes:
+
+- Start with the micro profile when you want to see whether the model falls into
+  a named wrong-answer basin before the correct answer appears.
+- Closed-answer tasks make `__match.png` and `__step_influence.png` more directly
+  interpretable than open-ended explanatory prompts.
+- Inspect raw traces before treating a correct final answer as faithful reasoning;
+  some useful runs are valuable precisely because the trace and answer dynamics
+  disagree.

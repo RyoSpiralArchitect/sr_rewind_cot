@@ -4,6 +4,8 @@ Layout:
 - `prompts/*.txt`: legacy `v1` flat templates kept for backward compatibility.
 - `prompts/v2/general_reasoning/*.txt`: shared v2 templates.
 - `prompts/v2/<family>/_guidance.txt`: family-specific guidance injected into the shared v2 templates.
+- `traces/syllogism_interference_v1/*.json`: fixed trace variants used by the
+  syllogism trace-interference pilot.
 
 Built-in v2 families:
 - `general_reasoning`

@@ -14,6 +14,14 @@ Current notes:
   Practical notes from text-trace probes: when text helps, what it fixes, and
   why exact-match metrics can be misleading for open-ended explanations.
 
+- [closed_answer_reasoning_v1.md](./closed_answer_reasoning_v1.md)
+  Notes from the Carol-trap pilot and the motivation for a closed-answer
+  reasoning micro profile.
+
+- [syllogism_trace_interference_v1.md](./syllogism_trace_interference_v1.md)
+  Follow-up on a tiny syllogism anomaly where added trace wording can push a
+  stable `No` answer toward a transient `Yes` basin.
+
 - [plot_field_guide.md](./plot_field_guide.md)
   A compact guide for reading the most useful plot families and deciding whether a
   run shows structural preservation, semantic drift, or core collapse.

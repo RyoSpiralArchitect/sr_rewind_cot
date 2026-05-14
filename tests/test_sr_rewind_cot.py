@@ -1269,6 +1269,34 @@ class TestSemanticInfluenceMetrics(unittest.TestCase):
         self.assertEqual(stats["semantic_match_rate"], 1.0)
         self.assertGreater(float(stats["semantic_similarity_mean"] or 0.0), 0.95)
 
+    def test_answer_semantic_stats_strip_answer_wrapper(self) -> None:
+        stats = spbc.answer_semantic_stats(
+            ["Answer: Bob<|eot_id|>", "Conclusion: Bob."],
+            "Bob",
+            threshold=0.95,
+        )
+        self.assertEqual(stats["semantic_match_rate"], 1.0)
+        self.assertEqual(stats["content_jaccard_mean"], 1.0)
+
+    def test_answer_semantic_stats_short_answers_do_not_match_unrelated_outputs(self) -> None:
+        stats = spbc.answer_semantic_stats(
+            ["A", "", "Answer: A"],
+            "No",
+            threshold=0.72,
+        )
+        self.assertEqual(stats["semantic_match_rate"], 0.0)
+        self.assertLess(float(stats["semantic_similarity_mean"] or 0.0), 0.72)
+        self.assertEqual(stats["content_jaccard_mean"], 0.0)
+
+    def test_answer_semantic_stats_short_wrapped_answer_matches(self) -> None:
+        stats = spbc.answer_semantic_stats(
+            ["Answer: No.", "no<|eot_id|>"],
+            "No",
+            threshold=0.95,
+        )
+        self.assertEqual(stats["semantic_match_rate"], 1.0)
+        self.assertEqual(stats["semantic_similarity_mean"], 1.0)
+
     def test_compute_curve_adds_semantic_answer_metrics(self) -> None:
         class _CurveBackend:
             def __init__(self) -> None:

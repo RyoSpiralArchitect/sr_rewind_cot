@@ -754,7 +754,11 @@ def mean_or_none(xs: List[float]) -> Optional[float]:
     return (sum(xs) / len(xs)) if xs else None
 
 def semantic_text(text: str) -> str:
-    return strip_generation_markers(text)
+    raw = strip_generation_markers(strip_markdown_code_fence(text or "")).strip()
+    if not raw:
+        return ""
+    sanitized = sanitize_trace_answer(raw)
+    return sanitized if sanitized else raw
 
 def sequence_similarity(a: str, b: str) -> float:
     import difflib
@@ -782,13 +786,37 @@ def content_jaccard_similarity(a: str, b: str) -> float:
 def step_semantic_similarity(a: str, b: str) -> float:
     return max(sequence_similarity(a, b), content_jaccard_similarity(a, b))
 
+def answer_content_words(text: str) -> set[str]:
+    return set(CONTENT_WORD_RE.findall(normalize_answer(semantic_text(text))))
+
+def answer_content_jaccard_similarity(a: str, b: str) -> float:
+    wa = answer_content_words(a)
+    wb = answer_content_words(b)
+    if not wa and not wb:
+        return 1.0 if normalize_answer(semantic_text(a)) == normalize_answer(semantic_text(b)) else 0.0
+    if not wa or not wb:
+        return 0.0
+    inter = len(wa & wb)
+    union = len(wa | wb)
+    return inter / max(1, union)
+
+def answer_semantic_similarity(a: str, b: str) -> float:
+    na = normalize_answer(semantic_text(a))
+    nb = normalize_answer(semantic_text(b))
+    if na and nb and na == nb:
+        return 1.0
+    char_sim = sequence_similarity(a, b)
+    if not answer_content_words(a) or not answer_content_words(b):
+        return char_sim
+    return max(char_sim, answer_content_jaccard_similarity(a, b))
+
 def answer_semantic_stats(
     answers: List[str],
     target: str,
     *,
     threshold: float = 0.72,
 ) -> Dict[str, Any]:
-    target_text = str(target or "").strip()
+    target_text = semantic_text(str(target or "")).strip()
     if not answers or not target_text:
         return {
             "semantic_match_rate": 0.0,
@@ -802,9 +830,9 @@ def answer_semantic_stats(
     for answer in answers:
         rows.append({
             "answer": answer,
-            "semantic": step_semantic_similarity(answer, target_text),
+            "semantic": answer_semantic_similarity(answer, target_text),
             "char": sequence_similarity(answer, target_text),
-            "jaccard": content_jaccard_similarity(answer, target_text),
+            "jaccard": answer_content_jaccard_similarity(answer, target_text),
         })
     semantic_values = [float(row["semantic"]) for row in rows]
     char_values = [float(row["char"]) for row in rows]

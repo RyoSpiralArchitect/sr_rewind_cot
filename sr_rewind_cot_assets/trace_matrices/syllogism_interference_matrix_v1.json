@@ -1,0 +1,86 @@
+{
+  "id": "syllogism_interference_matrix_v1",
+  "description": "Controlled fixed-trace matrix for testing whether class/subset wording creates transient yes/no answer basins in simple syllogisms.",
+  "expected_label": "no",
+  "cases": [
+    {
+      "id": "dax_wug_mip",
+      "s_singular": "dax",
+      "s_plural": "dax",
+      "s_article": "a",
+      "m_singular": "wug",
+      "m_plural": "wugs",
+      "m_article": "a",
+      "o_singular": "mip",
+      "o_plural": "mips",
+      "o_article": "a"
+    },
+    {
+      "id": "blicket_rone_fep",
+      "s_singular": "blicket",
+      "s_plural": "blickets",
+      "s_article": "a",
+      "m_singular": "rone",
+      "m_plural": "rones",
+      "m_article": "a",
+      "o_singular": "fep",
+      "o_plural": "feps",
+      "o_article": "a"
+    },
+    {
+      "id": "glim_taver_nork",
+      "s_singular": "glim",
+      "s_plural": "glims",
+      "s_article": "a",
+      "m_singular": "taver",
+      "m_plural": "tavers",
+      "m_article": "a",
+      "o_singular": "nork",
+      "o_plural": "norks",
+      "o_article": "a"
+    }
+  ],
+  "question_template": "All {s_plural} are {m_plural}. No {m_plural} are {o_plural}. Can any {s_singular} be {o_article} {o_singular}? Reply with exactly one line: Answer: <yes/no>.",
+  "variants": [
+    {
+      "id": "direct_premises",
+      "description": "Original premise wording only.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}."
+      ]
+    },
+    {
+      "id": "direct_conclusion",
+      "description": "Original premises plus a direct valid conclusion.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}.",
+        "Therefore, no {s_singular} can be {o_article} {o_singular}."
+      ]
+    },
+    {
+      "id": "class_repaired",
+      "description": "Class/subset wording where the second prefix is expected to be the interference point and the final conclusion repairs it.",
+      "answer": "No.",
+      "steps": [
+        "Every {s_singular} is inside the class of {m_plural}.",
+        "The class of {m_plural} has no overlap with the class of {o_plural}.",
+        "Therefore, the class of {s_plural} has no overlap with the class of {o_plural}."
+      ]
+    },
+    {
+      "id": "bad_converse",
+      "description": "Invalid converse-like trace inspired by rewind-side drift.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}.",
+        "If all {s_plural} are {m_plural}, then being {m_article} {m_singular} implies being {s_article} {s_singular}.",
+        "Therefore, {s_article} {s_singular} may still be {o_article} {o_singular}."
+      ]
+    }
+  ]
+}

@@ -22,6 +22,10 @@ Current notes:
   Follow-up on a tiny syllogism anomaly where added trace wording can push a
   stable `No` answer toward a transient `Yes` basin.
 
+- [syllogism_interference_matrix_v1.md](./syllogism_interference_matrix_v1.md)
+  Controlled matrix for testing whether the syllogism interference effect
+  survives across nonce words, trace variants, and answer temperatures.
+
 - [plot_field_guide.md](./plot_field_guide.md)
   A compact guide for reading the most useful plot families and deciding whether a
   run shows structural preservation, semantic drift, or core collapse.

@@ -11,6 +11,7 @@ from unittest import mock
 
 import sr_rewind_cot as spbc
 import sr_rewind_cot_metrics as spmetrics
+import sr_rewind_cot_trace_matrix as spmatrix
 
 
 def _tempdir():
@@ -201,10 +202,31 @@ class TestNamingAndPromptAssets(unittest.TestCase):
     def test_docs_exist(self) -> None:
         base = Path(spbc.SCRIPT_DIR) / "docs"
         self.assertTrue((base / "README.md").exists())
+        self.assertTrue((base / "closed_answer_reasoning_v1.md").exists())
         self.assertTrue((base / "general_reasoning_text_mode.md").exists())
         self.assertTrue((base / "general_reasoning_speculative_v1.md").exists())
         self.assertTrue((base / "plot_field_guide.md").exists())
         self.assertTrue((base / "roadmap.md").exists())
+        self.assertTrue((base / "syllogism_trace_interference_v1.md").exists())
+        self.assertTrue((base / "syllogism_interference_matrix_v1.md").exists())
+
+    def test_syllogism_interference_matrix_spec_expands(self) -> None:
+        path = Path(spbc.SCRIPT_DIR) / "sr_rewind_cot_assets" / "trace_matrices" / "syllogism_interference_matrix_v1.json"
+        self.assertTrue(path.exists())
+        spec = spmatrix.load_matrix_spec(str(path))
+        items = spmatrix.expand_matrix_items(spec)
+        self.assertEqual(spec["id"], "syllogism_interference_matrix_v1")
+        self.assertEqual(len(items), 12)
+        first = items[0]
+        self.assertEqual(first["case_id"], "dax_wug_mip")
+        self.assertEqual(first["variant_id"], "direct_premises")
+        self.assertIn("All dax are wugs.", first["question"])
+        self.assertEqual(first["steps"], ["All dax are wugs.", "No wugs are mips."])
+
+    def test_trace_matrix_yes_no_label_strips_answer_wrappers(self) -> None:
+        self.assertEqual(spmatrix.yes_no_label("Answer: No.<|eot_id|>"), "no")
+        self.assertEqual(spmatrix.yes_no_label("Conclusion: yes"), "yes")
+        self.assertEqual(spmatrix.yes_no_label("Maybe"), "other")
 
     def test_v2_prompt_family_guidance_is_injected(self) -> None:
         prompt = spbc.build_trace_prompt(

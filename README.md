@@ -214,6 +214,19 @@ python3 sr_rewind_cot_metrics.py show --run results/run_YYYYMMDD_HHMMSS
 python3 sr_rewind_cot_metrics.py compare --left results/run_A --right results/run_B --aggregate
 ```
 
+### 7. Run the syllogism trace-interference matrix
+
+```bash
+python3 sr_rewind_cot_trace_matrix.py \
+  --spec sr_rewind_cot_assets/trace_matrices/syllogism_interference_matrix_v1.json \
+  --model ./model/llama-3.2-3b \
+  --device mps \
+  --hf-backend mlx \
+  --dtype float16 \
+  --n 12 \
+  --temps 0.0,0.4
+```
+
 ## Outputs
 
 Each run writes a timestamped directory under `results/`.

@@ -77,12 +77,26 @@ def expand_matrix_items(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def yes_no_label(answer: str) -> str:
-    text = sr.normalize_answer(sr.semantic_text(answer))
-    text = re.sub(r"^answer\s*[:=-]\s*", "", text, flags=re.IGNORECASE).strip()
-    if text.startswith("yes"):
-        return "yes"
-    if text.startswith("no"):
-        return "no"
+    text = sr.normalize_answer(sr.semantic_text(answer)).strip()
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+
+    def _strip_answer_prefix(value: str) -> str:
+        return re.sub(
+            r"^(final\s+answer|answer|conclusion)\s*[:=-]\s*",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        ).strip()
+
+    candidates = [_strip_answer_prefix(text)]
+    if first_line and first_line != text:
+        candidates.append(_strip_answer_prefix(first_line))
+
+    for candidate in candidates:
+        if candidate.startswith("yes"):
+            return "yes"
+        if candidate.startswith("no"):
+            return "no"
     return "other"
 
 

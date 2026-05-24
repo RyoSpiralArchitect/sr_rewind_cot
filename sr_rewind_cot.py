@@ -5270,48 +5270,7 @@ def summarize_trace_vs_rewind_for_summary(res: Dict[str, Any]) -> Dict[str, Any]
     }
 
 def summarize_rewind_core_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
-    core = res.get("rewind_core") or {}
-    if not isinstance(core, dict):
-        return {
-            "rewind_fixed_point_depth": None,
-            "rewind_fixed_point_type": None,
-            "rewind_answer_reproduction_rate": None,
-            "rewind_fixed_point_recurrence_rate": None,
-            "rewind_pre_fixed_novelty_mean": None,
-            "rewind_core_strength": None,
-            "rewind_core_candidate_text": None,
-            "rewind_core_candidate_depth": None,
-            "rewind_core_candidate_source": None,
-            "rewind_core_candidate_forward_index": None,
-            "rewind_core_candidate_forward_similarity": None,
-            "rewind_core_certificate_mode": None,
-            "rewind_core_certificate_necessity": None,
-            "rewind_core_certificate_sufficiency": None,
-            "rewind_core_certificate_stability": None,
-            "rewind_core_certificate_bidirectional_attractor": None,
-            "rewind_core_certificate_minimality": None,
-            "rewind_core_certificate_score": None,
-        }
-    return {
-        "rewind_fixed_point_depth": core.get("fixed_point_depth"),
-        "rewind_fixed_point_type": core.get("fixed_point_type"),
-        "rewind_answer_reproduction_rate": core.get("answer_reproduction_rate"),
-        "rewind_fixed_point_recurrence_rate": core.get("fixed_point_recurrence_rate"),
-        "rewind_pre_fixed_novelty_mean": core.get("pre_fixed_novelty_mean"),
-        "rewind_core_strength": core.get("core_strength"),
-        "rewind_core_candidate_text": core.get("core_candidate_text"),
-        "rewind_core_candidate_depth": core.get("core_candidate_depth"),
-        "rewind_core_candidate_source": core.get("core_candidate_source"),
-        "rewind_core_candidate_forward_index": core.get("core_candidate_forward_index"),
-        "rewind_core_candidate_forward_similarity": core.get("core_candidate_forward_similarity"),
-        "rewind_core_certificate_mode": core.get("core_certificate_mode"),
-        "rewind_core_certificate_necessity": core.get("core_certificate_necessity"),
-        "rewind_core_certificate_sufficiency": core.get("core_certificate_sufficiency"),
-        "rewind_core_certificate_stability": core.get("core_certificate_stability"),
-        "rewind_core_certificate_bidirectional_attractor": core.get("core_certificate_bidirectional_attractor"),
-        "rewind_core_certificate_minimality": core.get("core_certificate_minimality"),
-        "rewind_core_certificate_score": core.get("core_certificate_score"),
-    }
+    return metrics.summarize_rewind_core_for_summary(res)
 
 def summarize_rewind_process_reward_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
     rewind_trace = res.get("rewind_trace") or {}

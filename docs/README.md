@@ -6,6 +6,14 @@ runs are shaping the longer-term research direction.
 
 Current notes:
 
+- [core_certificate_phase1.md](./core_certificate_phase1.md)
+  The first explicit move from pure observation toward intervention, including
+  `fixed_point_type` and `core_certificate_lite`.
+
+- [bad_converse_ablation_v1.md](./bad_converse_ablation_v1.md)
+  Phrase ablation for localizing which bad-converse wording creates the robust
+  `Yes` attractor in simple syllogisms.
+
 - [general_reasoning_speculative_v1.md](./general_reasoning_speculative_v1.md)
   Why the three speculative questions were added, what each one probes, and what
   the early runs seem to reveal.

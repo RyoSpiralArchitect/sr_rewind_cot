@@ -43,6 +43,7 @@ This makes it useful for experiments about:
 - Save raw generations and prompt/output logs as JSONL for inspection.
 - Save atomic `step_records` so steps can be analyzed as structured claims instead of only flat strings.
 - Compute forward stability curves, entropy, divergence, rewind novelty, fixed-point depth, and core-strength style metrics.
+- Type rewind fixed points and score rewind-side core candidates with a lightweight intervention bundle (`core_certificate_lite`).
 - Compare `base` vs `PRM-selected` traces on both the forward and rewind side, including a dedicated `base rewind` vs `PRM rewind` axis.
 - Record stage timings and rewind workload counts so bottlenecks can be read directly from `summary.csv`.
 - Plot forward, rewind, bridge, trace-vs-rewind similarity, rewind novelty, rewind axes, step influence, and base-vs-PRM-vs-rewind comparisons.
@@ -227,6 +228,20 @@ python3 sr_rewind_cot_trace_matrix.py \
   --temps 0.0,0.4
 ```
 
+To isolate the robust bad-converse `Yes` attractor, swap in the phrase
+ablation spec:
+
+```bash
+python3 sr_rewind_cot_trace_matrix.py \
+  --spec sr_rewind_cot_assets/trace_matrices/bad_converse_ablation_v1.json \
+  --model ./model/llama-3.2-3b \
+  --device mps \
+  --hf-backend mlx \
+  --dtype float16 \
+  --n 8 \
+  --temps 0.0,0.4
+```
+
 ## Outputs
 
 Each run writes a timestamped directory under `results/`.
@@ -273,6 +288,7 @@ If you want the project to read more like an unfolding study than a single scrip
 start here:
 
 - [docs/general_reasoning_speculative_v1.md](./docs/general_reasoning_speculative_v1.md)
+- [docs/core_certificate_phase1.md](./docs/core_certificate_phase1.md)
 - [docs/plot_field_guide.md](./docs/plot_field_guide.md)
 - [docs/roadmap.md](./docs/roadmap.md)
 

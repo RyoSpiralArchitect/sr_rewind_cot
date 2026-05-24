@@ -4068,7 +4068,27 @@ def compute_rewind_bundle(
         if oc and rc and len(oc) == len(rc):
             gaps = [float(o.get("match_rate", 0.0)) - float(r.get("match_rate", 0.0)) for o, r in zip(oc, rc)]
             oracle_recovery_gap_mean = mean_or_none(gaps)
-    rewind_core = compute_rewind_core_metrics(rewind_trace, rewind_curve)
+    core_certificate = None
+    certificate_target_answer = baseline_A_star or trace.answer
+    if settings.core_certificate_mode == "lite":
+        core_certificate = compute_core_certificate_lite(
+            backend,
+            question,
+            trace,
+            rewind_trace,
+            rewind_curve,
+            certificate_target_answer,
+            settings,
+            run_seed=run_seed + 80_000,
+            forward_result=forward_result,
+        )
+    rewind_core = compute_rewind_core_metrics(
+        rewind_trace,
+        rewind_curve,
+        trace=trace,
+        baseline_answer=certificate_target_answer,
+        core_certificate=core_certificate,
+    )
     rewind_workload = {
         "rewind_trace_generation_calls": rewind_trace.get("generation_calls"),
         "rewind_trace_attempts": rewind_trace.get("generation_attempts"),
@@ -5250,22 +5270,7 @@ def summarize_trace_vs_rewind_for_summary(res: Dict[str, Any]) -> Dict[str, Any]
     }
 
 def summarize_rewind_core_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
-    core = res.get("rewind_core") or {}
-    if not isinstance(core, dict):
-        return {
-            "rewind_fixed_point_depth": None,
-            "rewind_answer_reproduction_rate": None,
-            "rewind_fixed_point_recurrence_rate": None,
-            "rewind_pre_fixed_novelty_mean": None,
-            "rewind_core_strength": None,
-        }
-    return {
-        "rewind_fixed_point_depth": core.get("fixed_point_depth"),
-        "rewind_answer_reproduction_rate": core.get("answer_reproduction_rate"),
-        "rewind_fixed_point_recurrence_rate": core.get("fixed_point_recurrence_rate"),
-        "rewind_pre_fixed_novelty_mean": core.get("pre_fixed_novelty_mean"),
-        "rewind_core_strength": core.get("core_strength"),
-    }
+    return metrics.summarize_rewind_core_for_summary(res)
 
 def summarize_rewind_process_reward_for_summary(res: Dict[str, Any]) -> Dict[str, Any]:
     rewind_trace = res.get("rewind_trace") or {}
@@ -5501,6 +5506,10 @@ def parse_experiment_settings(cfg: Dict[str, Any]) -> ExperimentSettings:
         rewind_escape_temperature=float(e.get("rewind_escape_temperature", 0.6)),
         rewind_step_top_p=float(e.get("rewind_step_top_p", 0.9)),
         rewind_step_repetition_penalty=float(e.get("rewind_step_repetition_penalty", 1.05)),
+        core_certificate_mode=str(e.get("core_certificate_mode", "off")),
+        core_certificate_samples=int(e.get("core_certificate_samples", 3)),
+        core_certificate_paraphrases=int(e.get("core_certificate_paraphrases", 3)),
+        core_certificate_max_new_tokens=int(e.get("core_certificate_max_new_tokens", 48)),
 
         enable_bridge=bool(e.get("enable_bridge", True)),
         bridge_tail_source=str(e.get("bridge_tail_source", "recovered")),
@@ -5543,6 +5552,10 @@ def parse_experiment_settings(cfg: Dict[str, Any]) -> ExperimentSettings:
     s.rewind_novelty_max_similarity = max(0.0, min(1.0, s.rewind_novelty_max_similarity))
     s.rewind_novelty_retries = max(0, s.rewind_novelty_retries)
     s.rewind_escape_temperature = max(0.0, s.rewind_escape_temperature)
+    s.core_certificate_mode = s.core_certificate_mode if s.core_certificate_mode in ("off", "lite") else "off"
+    s.core_certificate_samples = max(1, s.core_certificate_samples)
+    s.core_certificate_paraphrases = max(1, s.core_certificate_paraphrases)
+    s.core_certificate_max_new_tokens = max(8, s.core_certificate_max_new_tokens)
     s.rewind_step_top_p = max(0.0, min(1.0, s.rewind_step_top_p))
     s.rewind_step_repetition_penalty = max(1.0, s.rewind_step_repetition_penalty)
     s.bridge_tail_source = s.bridge_tail_source if s.bridge_tail_source in ("recovered", "oracle", "both") else "recovered"
@@ -6325,6 +6338,10 @@ def run_quick_hf(args: argparse.Namespace) -> str:
         rewind_escape_temperature=args.rewind_escape_temp,
         rewind_step_top_p=args.rewind_step_top_p,
         rewind_step_repetition_penalty=args.rewind_step_repetition_penalty,
+        core_certificate_mode=args.core_certificate_mode,
+        core_certificate_samples=args.core_certificate_samples,
+        core_certificate_paraphrases=args.core_certificate_paraphrases,
+        core_certificate_max_new_tokens=args.core_certificate_max_new_tokens,
 
         enable_bridge=not args.no_bridge,
         bridge_tail_source=args.bridge_tail_source,
@@ -6476,6 +6493,10 @@ def run_quick_http(args: argparse.Namespace) -> str:
         rewind_escape_temperature=args.rewind_escape_temp,
         rewind_step_top_p=args.rewind_step_top_p,
         rewind_step_repetition_penalty=args.rewind_step_repetition_penalty,
+        core_certificate_mode=args.core_certificate_mode,
+        core_certificate_samples=args.core_certificate_samples,
+        core_certificate_paraphrases=args.core_certificate_paraphrases,
+        core_certificate_max_new_tokens=args.core_certificate_max_new_tokens,
 
         enable_bridge=not args.no_bridge,
         bridge_tail_source=args.bridge_tail_source,

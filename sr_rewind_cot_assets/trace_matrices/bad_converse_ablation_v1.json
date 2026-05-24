@@ -1,0 +1,129 @@
+{
+  "id": "bad_converse_ablation_v1",
+  "description": "Phrase ablation matrix for isolating which parts of the bad-converse trace create a yes-answer attractor in simple syllogisms.",
+  "expected_label": "no",
+  "cases": [
+    {
+      "id": "dax_wug_mip",
+      "s_singular": "dax",
+      "s_plural": "dax",
+      "s_article": "a",
+      "m_singular": "wug",
+      "m_plural": "wugs",
+      "m_article": "a",
+      "o_singular": "mip",
+      "o_plural": "mips",
+      "o_article": "a"
+    },
+    {
+      "id": "blicket_rone_fep",
+      "s_singular": "blicket",
+      "s_plural": "blickets",
+      "s_article": "a",
+      "m_singular": "rone",
+      "m_plural": "rones",
+      "m_article": "a",
+      "o_singular": "fep",
+      "o_plural": "feps",
+      "o_article": "a"
+    },
+    {
+      "id": "glim_taver_nork",
+      "s_singular": "glim",
+      "s_plural": "glims",
+      "s_article": "a",
+      "m_singular": "taver",
+      "m_plural": "tavers",
+      "m_article": "a",
+      "o_singular": "nork",
+      "o_plural": "norks",
+      "o_article": "a"
+    }
+  ],
+  "question_template": "All {s_plural} are {m_plural}. No {m_plural} are {o_plural}. Can any {s_singular} be {o_article} {o_singular}? Reply with exactly one line: Answer: <yes/no>.",
+  "variants": [
+    {
+      "id": "control_premises",
+      "description": "Original premises only.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}."
+      ]
+    },
+    {
+      "id": "valid_direct_conclusion",
+      "description": "Original premises plus the valid negative conclusion.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}.",
+        "Therefore, no {s_singular} can be {o_article} {o_singular}."
+      ]
+    },
+    {
+      "id": "invalid_converse_only",
+      "description": "Adds the invalid converse step but does not add a permissive conclusion.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}.",
+        "If all {s_plural} are {m_plural}, then being {m_article} {m_singular} implies being {s_article} {s_singular}."
+      ]
+    },
+    {
+      "id": "may_still_without_converse",
+      "description": "Tests whether the permissive 'may still' conclusion alone is enough to create the yes attractor.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}.",
+        "Therefore, {s_article} {s_singular} may still be {o_article} {o_singular}."
+      ]
+    },
+    {
+      "id": "possibility_language_only",
+      "description": "Tests softer possibility wording without the explicit 'may still be' answer form.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}.",
+        "This leaves open whether {s_article} {s_singular} could be {o_article} {o_singular}."
+      ]
+    },
+    {
+      "id": "bad_converse_no_therefore",
+      "description": "Original invalid converse plus permissive wording, but without the discourse marker 'Therefore'.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}.",
+        "If all {s_plural} are {m_plural}, then being {m_article} {m_singular} implies being {s_article} {s_singular}.",
+        "{s_article} {s_singular} may still be {o_article} {o_singular}."
+      ]
+    },
+    {
+      "id": "bad_converse_full",
+      "description": "Original bad-converse trace from the interference matrix.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}.",
+        "If all {s_plural} are {m_plural}, then being {m_article} {m_singular} implies being {s_article} {s_singular}.",
+        "Therefore, {s_article} {s_singular} may still be {o_article} {o_singular}."
+      ]
+    },
+    {
+      "id": "converse_repaired",
+      "description": "Adds the invalid converse but repairs the final answer with the valid negative conclusion.",
+      "answer": "No.",
+      "steps": [
+        "All {s_plural} are {m_plural}.",
+        "No {m_plural} are {o_plural}.",
+        "If all {s_plural} are {m_plural}, then being {m_article} {m_singular} implies being {s_article} {s_singular}.",
+        "But every {s_singular} is {m_article} {m_singular}, and no {m_singular} is {o_article} {o_singular}.",
+        "Therefore, no {s_singular} can be {o_article} {o_singular}."
+      ]
+    }
+  ]
+}

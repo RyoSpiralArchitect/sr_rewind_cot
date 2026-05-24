@@ -6,6 +6,8 @@ Layout:
 - `prompts/v2/<family>/_guidance.txt`: family-specific guidance injected into the shared v2 templates.
 - `traces/syllogism_interference_v1/*.json`: fixed trace variants used by the
   syllogism trace-interference pilot.
+- `trace_matrices/bad_converse_ablation_v1.json`: phrase ablation spec for
+  localizing the robust bad-converse `Yes` attractor.
 - `trace_matrices/syllogism_interference_matrix_v1.json`: controlled matrix
   spec used by `sr_rewind_cot_trace_matrix.py`.
 

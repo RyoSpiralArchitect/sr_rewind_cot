@@ -50,7 +50,28 @@ Operational signs:
 - `rewind_curve.raw_answers_by_depth`
 - `__rewind_novelty.png`
 
-## Phase 4. Cleaner Comparison Protocols
+## Phase 4. Early Intervention Layer
+
+Questions:
+
+- Can a rewind-side core candidate be typed rather than merely noticed?
+- Does a candidate remain strong when isolated, paraphrased, or removed?
+- Which fixed points are parser artifacts, answer leaks, summaries, or
+  stronger core-like attractors?
+
+Operational signs:
+
+- `rewind_fixed_point_type`
+- `rewind_core_candidate_text`
+- `rewind_core_candidate_forward_similarity`
+- `rewind_core_certificate_necessity`
+- `rewind_core_certificate_sufficiency`
+- `rewind_core_certificate_stability`
+- `rewind_core_certificate_bidirectional_attractor`
+- `rewind_core_certificate_minimality`
+- `rewind_core_certificate_score`
+
+## Phase 5. Cleaner Comparison Protocols
 
 Next improvements that would help a paper:
 
@@ -64,7 +85,7 @@ Next improvements that would help a paper:
 - closed-answer micro sweeps before larger batches, so exact-match behavior is
   calibrated against tasks where answer surfaces are intentionally constrained
 
-## Phase 5. Stronger Process Models
+## Phase 6. Stronger Process Models
 
 Near-term:
 
@@ -75,7 +96,7 @@ Later:
 - test learned or judge-backed PRM variants
 - compare `Base CoT`, `PRM-CoT`, `Base Rewind`, and `PRM-Rewind` more formally
 
-## Phase 6. Writing Shape
+## Phase 7. Writing Shape
 
 A plausible paper arc could be:
 
@@ -90,7 +111,7 @@ The main goal is not to prove rewind "works" in a single sense. The stronger and
 more interesting claim is likely about the shapes of failure, compression, and
 surviving structure.
 
-## Phase 7. Conference-Facing Probe
+## Phase 8. Conference-Facing Probe
 
 The current strongest wedge is the closed-answer syllogism interference probe:
 

@@ -203,10 +203,12 @@ class TestNamingAndPromptAssets(unittest.TestCase):
         base = Path(spbc.SCRIPT_DIR) / "docs"
         self.assertTrue((base / "README.md").exists())
         self.assertTrue((base / "closed_answer_reasoning_v1.md").exists())
+        self.assertTrue((base / "core_certificate_phase1.md").exists())
         self.assertTrue((base / "general_reasoning_text_mode.md").exists())
         self.assertTrue((base / "general_reasoning_speculative_v1.md").exists())
         self.assertTrue((base / "plot_field_guide.md").exists())
         self.assertTrue((base / "roadmap.md").exists())
+        self.assertTrue((base / "bad_converse_ablation_v1.md").exists())
         self.assertTrue((base / "syllogism_trace_interference_v1.md").exists())
         self.assertTrue((base / "syllogism_interference_matrix_v1.md").exists())
 
@@ -222,6 +224,21 @@ class TestNamingAndPromptAssets(unittest.TestCase):
         self.assertEqual(first["variant_id"], "direct_premises")
         self.assertIn("All dax are wugs.", first["question"])
         self.assertEqual(first["steps"], ["All dax are wugs.", "No wugs are mips."])
+
+    def test_bad_converse_ablation_matrix_spec_expands(self) -> None:
+        path = Path(spbc.SCRIPT_DIR) / "sr_rewind_cot_assets" / "trace_matrices" / "bad_converse_ablation_v1.json"
+        self.assertTrue(path.exists())
+        spec = spmatrix.load_matrix_spec(str(path))
+        items = spmatrix.expand_matrix_items(spec)
+        variant_ids = {item["variant_id"] for item in items}
+        self.assertEqual(spec["id"], "bad_converse_ablation_v1")
+        self.assertEqual(len(items), 24)
+        self.assertIn("invalid_converse_only", variant_ids)
+        self.assertIn("may_still_without_converse", variant_ids)
+        self.assertIn("converse_repaired", variant_ids)
+        full = next(item for item in items if item["case_id"] == "dax_wug_mip" and item["variant_id"] == "bad_converse_full")
+        self.assertIn("being a wug implies being a dax", full["steps"][2])
+        self.assertIn("may still be a mip", full["steps"][3])
 
     def test_trace_matrix_yes_no_label_strips_answer_wrappers(self) -> None:
         self.assertEqual(spmatrix.yes_no_label("Answer: No.<|eot_id|>"), "no")
@@ -541,6 +558,24 @@ Answer: Pascal's Wager is an argument for belief under uncertainty, while agnost
         self.assertEqual(records[1]["type"], "comparison")
         self.assertEqual(records[1]["text"], "The difference is pragmatic versus epistemic.")
 
+    def test_normalize_trace_step_records_extracts_jsonish_step_text(self) -> None:
+        records = spbc.normalize_trace_step_records(
+            [
+                '{"id": 3, "type": "facet", "step": "Pascal\\u0027s Wager is prudential."}',
+            ]
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["id"], 3)
+        self.assertEqual(records[0]["type"], "facet")
+        self.assertEqual(records[0]["text"], "Pascal's Wager is prudential.")
+
+    def test_sanitize_trace_answer_drops_jsonish_step_payload(self) -> None:
+        sanitized = spbc.sanitize_trace_answer(
+            '{"id": 2, "type": "comparison", "step": "This is actually a step."}',
+            step_records=[{"id": 1, "type": "step", "text": "Premise step."}],
+        )
+        self.assertEqual(sanitized, "")
+
     def test_build_trace_accepts_plaintext_trace_output(self) -> None:
         class _PlaintextTraceBackend:
             def generate(self, prompt: str, temperature: float, seed=None) -> str:
@@ -690,6 +725,133 @@ class TestLoggingAndComparison(unittest.TestCase):
         self.assertEqual(core["fixed_point_depth"], 3)
         self.assertEqual(core["answer_reproduction_rate"], 1.0)
         self.assertAlmostEqual(core["core_strength"], 0.3)
+
+    def test_rewind_core_metrics_classify_fixed_point_types(self) -> None:
+        trace = spbc.Trace(steps=["premise", "core step"], answer="stable answer")
+        rewind_curve = {
+            "curve": [
+                {"top_answer": "stable answer"},
+                {"top_answer": "stable answer"},
+            ]
+        }
+        cases = [
+            (
+                "parser_fixed_point",
+                {
+                    "fixed_point_depth": 1,
+                    "fixed_point_recurrence_rate": 1.0,
+                    "pre_fixed_novelty_mean": 0.5,
+                    "loop_closure_tail_mean": 0.5,
+                    "novelty_curve": [{"depth": 1, "step": '{"step":"oops"}'}],
+                },
+                "parser_fixed_point",
+            ),
+            (
+                "answer_leak_fixed_point",
+                {
+                    "fixed_point_depth": 1,
+                    "fixed_point_recurrence_rate": 1.0,
+                    "pre_fixed_novelty_mean": 0.5,
+                    "loop_closure_tail_mean": 0.5,
+                    "novelty_curve": [{"depth": 1, "step": "stable answer"}],
+                },
+                "answer_leak_fixed_point",
+            ),
+            (
+                "summary_fixed_point",
+                {
+                    "fixed_point_depth": 1,
+                    "fixed_point_recurrence_rate": 1.0,
+                    "pre_fixed_novelty_mean": 0.5,
+                    "loop_closure_tail_mean": 0.5,
+                    "novelty_curve": [{"depth": 1, "step": "In summary, the view compresses into one contrast."}],
+                },
+                "summary_fixed_point",
+            ),
+            (
+                "no_fixed_point",
+                {
+                    "fixed_point_depth": None,
+                    "fixed_point_recurrence_rate": 0.0,
+                    "pre_fixed_novelty_mean": 0.5,
+                    "loop_closure_tail_mean": 0.5,
+                    "novelty_curve": [{"depth": 1, "step": "Local prerequisite step."}],
+                },
+                "no_fixed_point",
+            ),
+        ]
+        for label, rewind_trace, expected in cases:
+            with self.subTest(label=label):
+                core = spbc.compute_rewind_core_metrics(
+                    rewind_trace,
+                    rewind_curve,
+                    trace=trace,
+                    baseline_answer="stable answer",
+                )
+                self.assertEqual(core["fixed_point_type"], expected)
+
+    def test_core_certificate_lite_scores_candidate_interventions(self) -> None:
+        class _CertificateBackend:
+            def __init__(self) -> None:
+                self.name = "certificate"
+                self.max_new_tokens = 256
+
+            def generate(self, prompt: str, temperature: float, seed=None) -> str:
+                if "Candidate reasoning trace:" in prompt:
+                    has_core_bullet = any(
+                        line.strip().startswith("- ") and "core step" in line.lower()
+                        for line in prompt.splitlines()
+                    )
+                    return "stable answer" if has_core_bullet else "wrong answer"
+                return "wrong answer"
+
+        backend = _CertificateBackend()
+        trace = spbc.Trace(
+            steps=["premise step", "core step", "mapping step"],
+            answer="stable answer",
+        )
+        rewind_trace = {
+            "fixed_point_depth": 2,
+            "fixed_point_recurrence_rate": 1.0,
+            "pre_fixed_novelty_mean": 0.7,
+            "loop_closure_tail_mean": 0.6,
+            "latest_to_earlier": ["mapping step", "core step"],
+            "forward_order": ["core step", "mapping step"],
+            "novelty_curve": [{"depth": 2, "step": "core step", "max_similarity_to_previous": 1.0, "novelty": 0.0}],
+        }
+        rewind_curve = {
+            "curve": [
+                {"top_answer": "stable answer"},
+                {"top_answer": "stable answer"},
+            ]
+        }
+        settings = spbc.ExperimentSettings(
+            core_certificate_mode="lite",
+            core_certificate_samples=2,
+            core_certificate_paraphrases=2,
+            core_certificate_max_new_tokens=24,
+            semantic_match_threshold=0.95,
+            temperature_reanswer=0.0,
+        )
+        cert = spbc.compute_core_certificate_lite(
+            backend,
+            "Why does this core step matter?",
+            trace,
+            rewind_trace,
+            rewind_curve,
+            "stable answer",
+            settings,
+            run_seed=123,
+            forward_result={"curve": [{"match_rate": 1.0}]},
+        )
+        self.assertEqual(cert["core_certificate_mode"], "lite")
+        self.assertEqual(cert["core_candidate_forward_index"], 1)
+        self.assertAlmostEqual(float(cert["core_candidate_forward_similarity"] or 0.0), 1.0, places=6)
+        self.assertEqual(cert["core_certificate_necessity"], 1.0)
+        self.assertEqual(cert["core_certificate_sufficiency"], 1.0)
+        self.assertEqual(cert["core_certificate_stability"], 1.0)
+        self.assertGreater(float(cert["core_certificate_minimality"] or 0.0), 0.0)
+        self.assertGreater(float(cert["core_certificate_score"] or 0.0), 0.7)
 
 
 class TestHFBackendSelection(unittest.TestCase):
@@ -931,6 +1093,54 @@ class TestRawGenerationCapture(unittest.TestCase):
 
         self.assertIn("raw_answers_by_depth", rewind["oracle_tail_curve"])
         self.assertEqual(len(rewind["oracle_tail_curve"]["raw_answers_by_depth"]), 3)
+
+    def test_compute_rewind_bundle_attaches_core_certificate_lite(self) -> None:
+        backend = _StubBackend()
+        settings = spbc.ExperimentSettings(
+            n_samples_baseline=1,
+            n_samples_per_k=1,
+            rewind_samples_per_depth=1,
+            max_steps=2,
+            compute_oracle_tail=False,
+            core_certificate_mode="lite",
+        )
+        trace = spbc.Trace(steps=["step 1", "step 2"], answer="a_n = n^2")
+        forward = spbc.compute_curve(
+            backend,
+            "数列 1,4,9,16,... の一般項を求めよ。",
+            trace,
+            settings,
+            run_seed=123,
+        )
+        with mock.patch.object(
+            spbc,
+            "compute_core_certificate_lite",
+            return_value={
+                "core_certificate_mode": "lite",
+                "core_candidate_text": "rewind step 1",
+                "core_candidate_depth": 1,
+                "core_candidate_source": "fixed_point",
+                "core_candidate_forward_index": 0,
+                "core_candidate_forward_similarity": 0.9,
+                "core_certificate_necessity": 0.7,
+                "core_certificate_sufficiency": 0.8,
+                "core_certificate_stability": 0.75,
+                "core_certificate_bidirectional_attractor": 0.9,
+                "core_certificate_minimality": 0.5,
+                "core_certificate_score": 0.72,
+            },
+        ) as compute_certificate:
+            rewind = spbc.compute_rewind_bundle(
+                backend,
+                "数列 1,4,9,16,... の一般項を求めよ。",
+                trace,
+                settings,
+                forward,
+                run_seed=456,
+            )
+        compute_certificate.assert_called_once()
+        self.assertEqual(rewind["rewind_core"]["core_certificate_mode"], "lite")
+        self.assertAlmostEqual(float(rewind["rewind_core"]["core_certificate_score"] or 0.0), 0.72, places=6)
 
 
 class TestBatchGenerationReuse(unittest.TestCase):
@@ -1239,6 +1449,35 @@ class TestRewindProcessRewardLite(unittest.TestCase):
         self.assertEqual(summary["rewind_trace_attempts"], 4)
         self.assertEqual(summary["rewind_total_generation_calls"], 62)
         self.assertAlmostEqual(float(summary["time_rewind_total_s"] or 0.0), 0.66, places=6)
+
+    def test_metrics_summary_includes_rewind_core_certificate_fields(self) -> None:
+        summary = spmetrics.summarize_rewind_core_for_summary({
+            "rewind_core": {
+                "fixed_point_depth": 2,
+                "fixed_point_type": "core_fixed_point",
+                "answer_reproduction_rate": 0.8,
+                "fixed_point_recurrence_rate": 0.75,
+                "pre_fixed_novelty_mean": 0.6,
+                "core_strength": 0.36,
+                "core_candidate_text": "core step",
+                "core_candidate_depth": 2,
+                "core_candidate_source": "fixed_point",
+                "core_candidate_forward_index": 1,
+                "core_candidate_forward_similarity": 0.95,
+                "core_certificate_mode": "lite",
+                "core_certificate_necessity": 0.7,
+                "core_certificate_sufficiency": 0.8,
+                "core_certificate_stability": 0.75,
+                "core_certificate_bidirectional_attractor": 0.9,
+                "core_certificate_minimality": 0.5,
+                "core_certificate_score": 0.72,
+            }
+        })
+        self.assertEqual(summary["rewind_fixed_point_type"], "core_fixed_point")
+        self.assertEqual(summary["rewind_core_candidate_text"], "core step")
+        self.assertEqual(summary["rewind_core_candidate_forward_index"], 1)
+        self.assertEqual(summary["rewind_core_certificate_mode"], "lite")
+        self.assertAlmostEqual(float(summary["rewind_core_certificate_score"] or 0.0), 0.72, places=6)
 
     def test_runtime_summary_includes_mlx_reuse_metrics(self) -> None:
         summary = spbc.summarize_mlx_reuse_for_summary({

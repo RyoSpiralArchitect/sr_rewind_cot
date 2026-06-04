@@ -1,0 +1,29 @@
+# generated experiment artifacts
+*.sqlite
+*.sqlite3
+runs*.db
+reports/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# environments and secrets
+.env
+.env.*
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

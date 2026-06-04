@@ -1,0 +1,42 @@
+{
+  "generators": [
+    {
+      "name": "openai_gpt4o_mini_generator",
+      "type": "openai_compatible",
+      "model": "gpt-4o-mini",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "timeout_s": 60,
+      "max_tokens": 700
+    }
+  ],
+  "judges": [
+    {
+      "name": "openai_gpt4o_mini_judge_a",
+      "type": "openai_compatible",
+      "model": "gpt-4o-mini",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "timeout_s": 60,
+      "max_tokens": 900
+    },
+    {
+      "name": "openai_gpt4o_mini_judge_b",
+      "type": "openai_compatible",
+      "model": "gpt-4o-mini",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "timeout_s": 60,
+      "max_tokens": 900
+    },
+    {
+      "name": "openai_gpt4o_mini_judge_c",
+      "type": "openai_compatible",
+      "model": "gpt-4o-mini",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "timeout_s": 60,
+      "max_tokens": 900
+    }
+  ]
+}

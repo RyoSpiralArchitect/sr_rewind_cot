@@ -1,0 +1,51 @@
+{
+  "generators": [
+    {
+      "name": "provider_a_generator",
+      "type": "openai_compatible",
+      "model": "MODEL_NAME_A",
+      "base_url": "https://example-provider-a.invalid/v1",
+      "api_key_env": "PROVIDER_A_API_KEY",
+      "timeout_s": 60,
+      "max_tokens": 700
+    },
+    {
+      "name": "provider_b_generator",
+      "type": "openai_compatible",
+      "model": "MODEL_NAME_B",
+      "base_url": "https://example-provider-b.invalid/v1",
+      "api_key_env": "PROVIDER_B_API_KEY",
+      "timeout_s": 60,
+      "max_tokens": 700
+    }
+  ],
+  "judges": [
+    {
+      "name": "judge_family_1",
+      "type": "openai_compatible",
+      "model": "JUDGE_MODEL_1",
+      "base_url": "https://example-judge-1.invalid/v1",
+      "api_key_env": "JUDGE_1_API_KEY",
+      "timeout_s": 60,
+      "max_tokens": 900
+    },
+    {
+      "name": "judge_family_2",
+      "type": "openai_compatible",
+      "model": "JUDGE_MODEL_2",
+      "base_url": "https://example-judge-2.invalid/v1",
+      "api_key_env": "JUDGE_2_API_KEY",
+      "timeout_s": 60,
+      "max_tokens": 900
+    },
+    {
+      "name": "judge_family_3",
+      "type": "openai_compatible",
+      "model": "JUDGE_MODEL_3",
+      "base_url": "https://example-judge-3.invalid/v1",
+      "api_key_env": "JUDGE_3_API_KEY",
+      "timeout_s": 60,
+      "max_tokens": 900
+    }
+  ]
+}

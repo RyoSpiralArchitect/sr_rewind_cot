@@ -1,0 +1,42 @@
+{
+  "generators": [
+    {
+      "name": "mock_safe_generator",
+      "type": "mock",
+      "model": "mock-safe",
+      "behavior": "safe"
+    },
+    {
+      "name": "mock_slippy_generator",
+      "type": "mock",
+      "model": "mock-slippy",
+      "behavior": "slippy"
+    },
+    {
+      "name": "mock_surface_generator",
+      "type": "mock",
+      "model": "mock-surface",
+      "behavior": "surface"
+    }
+  ],
+  "judges": [
+    {
+      "name": "mock_judge_a",
+      "type": "mock",
+      "model": "mock-judge-a",
+      "behavior": "safe"
+    },
+    {
+      "name": "mock_judge_b",
+      "type": "mock",
+      "model": "mock-judge-b",
+      "behavior": "safe"
+    },
+    {
+      "name": "mock_judge_c",
+      "type": "mock",
+      "model": "mock-judge-c",
+      "behavior": "safe"
+    }
+  ]
+}

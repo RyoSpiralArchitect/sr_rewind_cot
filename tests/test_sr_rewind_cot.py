@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import io
 import json
 import shutil
@@ -46,6 +47,43 @@ def _write_model_dir(path: Path, model_type: str, arch: str, *, with_tokenizer: 
     if with_tokenizer:
         (path / "tokenizer.json").write_text("{}", encoding="utf-8")
         (path / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+
+class _FakeMatrixBackend:
+    def __init__(self, *, fail_after_batches=None, **kwargs):
+        self.fail_after_batches = fail_after_batches
+        self.batch_calls = 0
+        self.failed = False
+
+    def _maybe_fail(self) -> None:
+        if self.failed or (
+            self.fail_after_batches is not None and self.batch_calls >= self.fail_after_batches
+        ):
+            self.failed = True
+            raise RuntimeError("planned fake failure")
+
+    def _answer(self, prompt: str, seed=None) -> str:
+        text = str(prompt)
+        if "may still be" in text or "could be" in text:
+            return "Answer: yes."
+        if seed is not None and int(seed) % 7 == 0:
+            return "Conclusion: yes"
+        return "Answer: no."
+
+    def generate_many(self, prompt: str, temperature: float, seeds):
+        self._maybe_fail()
+        self.batch_calls += 1
+        return [self._answer(prompt, seed) for seed in seeds]
+
+    def generate(self, prompt: str, temperature: float, seed=None) -> str:
+        self._maybe_fail()
+        return self._answer(prompt, seed)
+
+
+def _csv_rows(path: Path):
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return reader.fieldnames or [], list(reader)
 
 
 class TestHFLocalBackendPathResolution(unittest.TestCase):
@@ -244,6 +282,74 @@ class TestNamingAndPromptAssets(unittest.TestCase):
         self.assertEqual(spmatrix.yes_no_label("Answer: No.<|eot_id|>"), "no")
         self.assertEqual(spmatrix.yes_no_label("Conclusion: yes"), "yes")
         self.assertEqual(spmatrix.yes_no_label("Maybe"), "other")
+
+    def test_bad_converse_matrix_checkpoints_and_resumes_core_artifacts(self) -> None:
+        spec_path = Path(spbc.SCRIPT_DIR) / "sr_rewind_cot_assets" / "trace_matrices" / "bad_converse_ablation_v1.json"
+        completed_dir = Path(spbc.SCRIPT_DIR) / "results" / "run_20260515_092142_syllogism_interference_matrix_v1"
+        for name in ["run_meta.json", "matrix_rates.csv", "matrix_summary.csv", "matrix_results.json"]:
+            self.assertTrue((completed_dir / name).exists())
+
+        spec = spmatrix.load_matrix_spec(str(spec_path))
+        items = spmatrix.expand_matrix_items(spec)
+        expected_results = len(items)
+        expected_rate_rows = sum(len(item["steps"]) + 2 for item in items)
+        first_item_batches = len(items[0]["steps"]) + 2
+
+        with _tempdir() as td:
+            args = spmatrix.build_parser().parse_args([
+                "--spec", str(spec_path),
+                "--model", "fake-model",
+                "--device", "cpu",
+                "--hf-backend", "torch",
+                "--n", "1",
+                "--temps", "0.0",
+                "--out-dir", str(td),
+            ])
+
+            failing_backend = _FakeMatrixBackend(fail_after_batches=first_item_batches)
+            with self.assertRaisesRegex(RuntimeError, "planned fake failure"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    spmatrix.run_matrix(args, backend_factory=lambda **kwargs: failing_backend)
+
+            summary_header, summary_rows = _csv_rows(td / "matrix_summary.csv")
+            rate_header, rate_rows = _csv_rows(td / "matrix_rates.csv")
+            self.assertEqual(len(summary_rows), 1)
+            self.assertEqual(len(rate_rows), first_item_batches)
+            self.assertEqual(len(list((td / "checkpoints").glob("*.json"))), 1)
+            meta = json.loads((td / "run_meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(meta["status"], "running")
+            self.assertEqual(meta["n_completed_results"], 1)
+
+            resume_backend = _FakeMatrixBackend()
+            with contextlib.redirect_stdout(io.StringIO()):
+                spmatrix.run_matrix(args, backend_factory=lambda **kwargs: resume_backend)
+
+            completed_summary_header, _ = _csv_rows(completed_dir / "matrix_summary.csv")
+            completed_rate_header, _ = _csv_rows(completed_dir / "matrix_rates.csv")
+            summary_header, summary_rows = _csv_rows(td / "matrix_summary.csv")
+            rate_header, rate_rows = _csv_rows(td / "matrix_rates.csv")
+            self.assertEqual(summary_header, completed_summary_header)
+            self.assertEqual(rate_header, completed_rate_header)
+            self.assertEqual(len(summary_rows), expected_results)
+            self.assertEqual(len(rate_rows), expected_rate_rows)
+            self.assertEqual(len(list((td / "checkpoints").glob("*.json"))), expected_results)
+            self.assertEqual(resume_backend.batch_calls, expected_rate_rows - first_item_batches)
+
+            result_payload = json.loads((td / "matrix_results.json").read_text(encoding="utf-8"))
+            self.assertEqual(result_payload["spec"]["id"], "bad_converse_ablation_v1")
+            self.assertEqual(len(result_payload["results"]), expected_results)
+            final_meta = json.loads((td / "run_meta.json").read_text(encoding="utf-8"))
+            self.assertEqual(final_meta["status"], "complete")
+            self.assertEqual(final_meta["n_completed_results"], expected_results)
+
+            def fail_if_backend_loaded(**kwargs):
+                raise AssertionError("complete resume should not load a backend")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                spmatrix.run_matrix(args, backend_factory=fail_if_backend_loaded)
+
+            if spbc.plt is not None:
+                self.assertTrue((td / "plots" / "yes_rate_heatmap_t0p0.png").exists())
 
     def test_v2_prompt_family_guidance_is_injected(self) -> None:
         prompt = spbc.build_trace_prompt(

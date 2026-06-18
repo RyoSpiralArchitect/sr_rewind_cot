@@ -21,6 +21,7 @@ DEFAULT_SPEC = os.path.join(
     "trace_matrices",
     "syllogism_interference_matrix_v1.json",
 )
+CHECKPOINT_DIRNAME = "checkpoints"
 
 
 def load_matrix_spec(path: str) -> Dict[str, Any]:
@@ -74,6 +75,119 @@ def expand_matrix_items(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "variant": dict(variant),
             })
     return items
+
+
+def _safe_key_part(value: Any) -> str:
+    text = str(value).strip()
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
+    return text.strip("._") or "x"
+
+
+def matrix_task_key(temp_index: int, item_index: int, temp: float, item: Dict[str, Any]) -> str:
+    return "__".join([
+        f"t{int(temp_index):03d}_{_safe_key_part(f'{float(temp):.12g}')}",
+        f"i{int(item_index):04d}",
+        _safe_key_part(item.get("question_id", "")),
+    ])
+
+
+def expand_matrix_tasks(items: List[Dict[str, Any]], temps: List[float], seed: int) -> List[Dict[str, Any]]:
+    tasks: List[Dict[str, Any]] = []
+    for temp_index, temp in enumerate(temps):
+        for item_index, item in enumerate(items):
+            tasks.append({
+                "key": matrix_task_key(temp_index, item_index, temp, item),
+                "temp_index": temp_index,
+                "item_index": item_index,
+                "temperature": float(temp),
+                "item": item,
+                "seed_base": int(seed) + temp_index * 1_000_000 + item_index * 10_000,
+            })
+    return tasks
+
+
+def _atomic_replace(path: str, writer: Any) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        sr.ensure_dir(parent)
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        writer(tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def atomic_write_json(path: str, obj: Any) -> None:
+    def _write(tmp_path: str) -> None:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+
+    _atomic_replace(path, _write)
+
+
+def checkpoint_path(checkpoint_dir: str, task_key: str) -> str:
+    return os.path.join(checkpoint_dir, f"{task_key}.json")
+
+
+def write_checkpoint(checkpoint_dir: str, task: Dict[str, Any], result: Dict[str, Any]) -> None:
+    item = task["item"]
+    atomic_write_json(checkpoint_path(checkpoint_dir, str(task["key"])), {
+        "key": task["key"],
+        "temp_index": task["temp_index"],
+        "item_index": task["item_index"],
+        "temperature": task["temperature"],
+        "seed_base": task["seed_base"],
+        "case_id": item.get("case_id"),
+        "variant_id": item.get("variant_id"),
+        "question_id": item.get("question_id"),
+        "result": result,
+    })
+
+
+def load_checkpoint(checkpoint_dir: str, task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    path = checkpoint_path(checkpoint_dir, str(task["key"]))
+    if not os.path.exists(path):
+        return None
+    payload = sr.read_json(path)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Matrix checkpoint must be a JSON object: {path}")
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError(f"Matrix checkpoint is missing result: {path}")
+    item = task["item"]
+    expected = {
+        "case_id": str(item.get("case_id", "")),
+        "variant_id": str(item.get("variant_id", "")),
+        "question_id": str(item.get("question_id", "")),
+    }
+    observed = {key: str(result.get(key, "")) for key in expected}
+    if observed != expected or abs(float(result.get("temperature", 0.0)) - float(task["temperature"])) > 1e-12:
+        raise RuntimeError(
+            f"Matrix checkpoint does not match planned task {task['key']}: {path}"
+        )
+    return result
+
+
+def load_checkpointed_results(checkpoint_dir: str, tasks: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    results_by_key: Dict[str, Dict[str, Any]] = {}
+    for task in tasks:
+        result = load_checkpoint(checkpoint_dir, task)
+        if result is not None:
+            results_by_key[str(task["key"])] = result
+    return results_by_key
+
+
+def ordered_results(tasks: List[Dict[str, Any]], results_by_key: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        results_by_key[str(task["key"])]
+        for task in tasks
+        if str(task["key"]) in results_by_key
+    ]
 
 
 def yes_no_label(answer: str) -> str:
@@ -210,10 +324,13 @@ def evaluate_item(
 
 
 def write_csv(path: str, rows: List[Dict[str, Any]], fieldnames: List[str]) -> None:
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    def _write(tmp_path: str) -> None:
+        with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    _atomic_replace(path, _write)
 
 
 def write_outputs(out_dir: str, spec: Dict[str, Any], results: List[Dict[str, Any]], args: argparse.Namespace) -> None:
@@ -274,10 +391,39 @@ def write_outputs(out_dir: str, spec: Dict[str, Any], results: List[Dict[str, An
         ],
     )
 
-    sr.write_json(os.path.join(out_dir, "matrix_results.json"), {
+    atomic_write_json(os.path.join(out_dir, "matrix_results.json"), {
         "spec": spec,
         "args": vars(args),
         "results": results,
+    })
+
+
+def write_run_meta(
+    out_dir: str,
+    *,
+    spec: Dict[str, Any],
+    spec_path: str,
+    items: List[Dict[str, Any]],
+    temps: List[float],
+    args: argparse.Namespace,
+    created_at: str,
+    status: str,
+    n_completed: int,
+    n_expected: int,
+) -> None:
+    atomic_write_json(os.path.join(out_dir, "run_meta.json"), {
+        "created_at": created_at,
+        "updated_at": datetime.now().isoformat(),
+        "script": "sr_rewind_cot_trace_matrix.py",
+        "spec_path": os.path.abspath(spec_path),
+        "spec_id": spec.get("id"),
+        "n_items": len(items),
+        "n_expected_results": int(n_expected),
+        "n_completed_results": int(n_completed),
+        "temperatures": temps,
+        "status": status,
+        "checkpoint_dir": CHECKPOINT_DIRNAME,
+        "args": vars(args),
     })
 
 
@@ -348,24 +494,61 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main() -> None:
-    args = build_parser().parse_args()
+def run_matrix(args: argparse.Namespace, backend_factory: Any = sr.HFLocalBackend) -> str:
     spec = load_matrix_spec(args.spec)
     items = expand_matrix_items(spec)
     temps = [float(part.strip()) for part in str(args.temps).split(",") if part.strip()]
     prompt_version, prompt_family = sr.normalize_prompt_selector(args.prompt_version, args.prompt_family)
     out_dir = sr.ensure_dir(args.out_dir or os.path.join("results", f"run_{sr.now_ts()}_{spec.get('id', 'trace_matrix')}"))
-    sr.write_json(os.path.join(out_dir, "run_meta.json"), {
-        "created_at": datetime.now().isoformat(),
-        "script": "sr_rewind_cot_trace_matrix.py",
-        "spec_path": os.path.abspath(args.spec),
-        "spec_id": spec.get("id"),
-        "n_items": len(items),
-        "temperatures": temps,
-        "args": vars(args),
-    })
+    checkpoint_dir = sr.ensure_dir(os.path.join(out_dir, CHECKPOINT_DIRNAME))
+    tasks = expand_matrix_tasks(items, temps, int(args.seed))
 
-    backend = sr.HFLocalBackend(
+    meta_path = os.path.join(out_dir, "run_meta.json")
+    created_at = datetime.now().isoformat()
+    if os.path.exists(meta_path):
+        try:
+            existing_meta = sr.read_json(meta_path)
+            if isinstance(existing_meta, dict) and str(existing_meta.get("created_at", "")).strip():
+                created_at = str(existing_meta["created_at"])
+        except Exception:
+            pass
+
+    results_by_key = load_checkpointed_results(checkpoint_dir, tasks)
+    results = ordered_results(tasks, results_by_key)
+    write_run_meta(
+        out_dir,
+        spec=spec,
+        spec_path=args.spec,
+        items=items,
+        temps=temps,
+        args=args,
+        created_at=created_at,
+        status="running",
+        n_completed=len(results),
+        n_expected=len(tasks),
+    )
+    write_outputs(out_dir, spec, results, args)
+    if results:
+        print(f"[matrix] resumed {len(results)}/{len(tasks)} checkpointed results from {out_dir}", flush=True)
+    if len(results) == len(tasks):
+        write_run_meta(
+            out_dir,
+            spec=spec,
+            spec_path=args.spec,
+            items=items,
+            temps=temps,
+            args=args,
+            created_at=created_at,
+            status="complete",
+            n_completed=len(results),
+            n_expected=len(tasks),
+        )
+        if not args.no_plots:
+            plot_heatmaps(out_dir, results)
+        print(f"[matrix] saved: {out_dir}", flush=True)
+        return out_dir
+
+    backend = backend_factory(
         name=args.name,
         model_path=args.model,
         tokenizer_path=None,
@@ -378,37 +561,75 @@ def main() -> None:
         repetition_penalty=1.0,
     )
 
-    results: List[Dict[str, Any]] = []
-    for temp_index, temp in enumerate(temps):
-        for item_index, item in enumerate(items):
-            result = evaluate_item(
-                backend,
-                item,
-                matrix_id=str(spec.get("id", "")),
-                temperature=temp,
-                n=max(1, int(args.n)),
-                seed_base=int(args.seed) + temp_index * 1_000_000 + item_index * 10_000,
-                prompt_version=prompt_version,
-                prompt_family=prompt_family,
-            )
-            results.append(result)
-            full = next(
-                (
-                    row for row in result["rates"]
-                    if row["kind"] == "prefix" and int(row["k"]) == len(result["trace"]["steps"])
-                ),
-                None,
-            )
-            print(
-                f"[matrix] temp={temp:g} {item['question_id']} "
-                f"full_yes={float((full or {}).get('yes_rate', 0.0)):.2f}",
-                flush=True,
-            )
+    for task in tasks:
+        task_key = str(task["key"])
+        item = task["item"]
+        temp = float(task["temperature"])
+        if task_key in results_by_key:
+            print(f"[matrix] skip checkpoint temp={temp:g} {item['question_id']}", flush=True)
+            continue
 
+        result = evaluate_item(
+            backend,
+            item,
+            matrix_id=str(spec.get("id", "")),
+            temperature=temp,
+            n=max(1, int(args.n)),
+            seed_base=int(task["seed_base"]),
+            prompt_version=prompt_version,
+            prompt_family=prompt_family,
+        )
+        write_checkpoint(checkpoint_dir, task, result)
+        results_by_key[task_key] = result
+        results = ordered_results(tasks, results_by_key)
+        write_outputs(out_dir, spec, results, args)
+        write_run_meta(
+            out_dir,
+            spec=spec,
+            spec_path=args.spec,
+            items=items,
+            temps=temps,
+            args=args,
+            created_at=created_at,
+            status="running",
+            n_completed=len(results),
+            n_expected=len(tasks),
+        )
+        full = next(
+            (
+                row for row in result["rates"]
+                if row["kind"] == "prefix" and int(row["k"]) == len(result["trace"]["steps"])
+            ),
+            None,
+        )
+        print(
+            f"[matrix] temp={temp:g} {item['question_id']} "
+            f"full_yes={float((full or {}).get('yes_rate', 0.0)):.2f}",
+            flush=True,
+        )
+
+    results = ordered_results(tasks, results_by_key)
     write_outputs(out_dir, spec, results, args)
+    write_run_meta(
+        out_dir,
+        spec=spec,
+        spec_path=args.spec,
+        items=items,
+        temps=temps,
+        args=args,
+        created_at=created_at,
+        status="complete",
+        n_completed=len(results),
+        n_expected=len(tasks),
+    )
     if not args.no_plots:
         plot_heatmaps(out_dir, results)
     print(f"[matrix] saved: {out_dir}", flush=True)
+    return out_dir
+
+
+def main() -> None:
+    run_matrix(build_parser().parse_args())
 
 
 if __name__ == "__main__":

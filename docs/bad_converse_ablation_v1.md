@@ -66,6 +66,62 @@ prompt:
 - If `converse_repaired` turns dark at the final prefix, a later valid repair
   can pull the model back out of the wrong-answer basin.
 
+## Resume Snapshot: 2026-06-18
+
+The previously stalled run at
+`results/run_20260515_212337_bad_converse_ablation_v1/` was resumed after the
+matrix runner gained per-cell checkpoints. The original metadata showed that the
+spec had expanded successfully to 24 planned cells, but the old runner only
+wrote final artifacts after every cell completed. A backend abort or interrupted
+process could therefore leave only `run_meta.json`.
+
+Resume command:
+
+```bash
+PYTHONNOUSERSITE=1 python3 sr_rewind_cot_trace_matrix.py \
+  --spec sr_rewind_cot_assets/trace_matrices/bad_converse_ablation_v1.json \
+  --model ./model/llama-3.2-3b \
+  --name llama-3.2-it \
+  --device mps \
+  --hf-backend mlx \
+  --dtype float16 \
+  --max-new-tokens 16 \
+  --temps 0.0 \
+  --n 4 \
+  --prompt-version v2 \
+  --prompt-family general_reasoning \
+  --seed 12345 \
+  --out-dir results/run_20260515_212337_bad_converse_ablation_v1
+```
+
+Completion check:
+
+- `run_meta.json`: `status=complete`, `n_completed_results=24`,
+  `n_expected_results=24`.
+- `checkpoints/`: 24 per-cell checkpoint files.
+- `matrix_summary.csv`: 24 rows.
+- `matrix_rates.csv`: 129 rows.
+- `plots/yes_rate_heatmap_t0p0.png`: generated successfully.
+
+Full-prefix `Yes` rates at `temperature=0.0`, averaged across the three nonce
+cases:
+
+| Variant | Mean full-prefix `Yes` rate | Per-case rates |
+| --- | ---: | --- |
+| `control_premises` | `0.00` | `0.00, 0.00, 0.00` |
+| `valid_direct_conclusion` | `0.00` | `0.00, 0.00, 0.00` |
+| `invalid_converse_only` | `0.00` | `0.00, 0.00, 0.00` |
+| `may_still_without_converse` | `1.00` | `1.00, 1.00, 1.00` |
+| `possibility_language_only` | `0.33` | `1.00, 0.00, 0.00` |
+| `bad_converse_no_therefore` | `1.00` | `1.00, 1.00, 1.00` |
+| `bad_converse_full` | `1.00` | `1.00, 1.00, 1.00` |
+| `converse_repaired` | `0.00` | `0.00, 0.00, 0.00` |
+
+The crisp result is that the invalid converse alone did not induce the wrong
+answer in this deterministic probe. The answer-shaped modal phrase `may still be`
+was sufficient across all nonce cases, and the repaired trace pulled the model
+back to `No`.
+
 ## Research Payoff
 
 This is a more paper-facing probe than the single anomaly. A phrase ablation
